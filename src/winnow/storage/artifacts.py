@@ -55,6 +55,65 @@ def store_jsonl_artifact(
     return meta
 
 
+def _validate_jsonl_lines(blob: bytes, path: Path) -> int:
+    record_count = 0
+    for raw_line in blob.splitlines():
+        text = raw_line.decode("utf-8").strip()
+        if not text:
+            continue
+        payload = json.loads(text)
+        if not isinstance(payload, dict):
+            raise TypeError(f"Artifact line is not a JSON object: {path}")
+        record_count += 1
+    return record_count
+
+
+def verify_jsonl_artifact(meta: dict[str, Any]) -> dict[str, Any]:
+    """Verify integrity of a JSONL artifact metadata envelope.
+
+    Raises if checks fail and returns a compact verification report otherwise.
+    """
+
+    uri = meta.get("uri")
+    artifact_id = meta.get("artifact_id")
+    expected_bytes = int(meta.get("bytes", 0))
+    expected_records = int(meta.get("record_count", 0))
+
+    if not isinstance(uri, str) or not uri:
+        raise ValueError("Artifact metadata missing URI.")
+    if not isinstance(artifact_id, str) or len(artifact_id) != 64:
+        raise ValueError("Artifact metadata missing valid SHA256 artifact_id.")
+
+    path = Path(uri)
+    if not path.exists():
+        raise FileNotFoundError(f"Artifact URI not found: {path}")
+
+    blob = path.read_bytes()
+    digest = sha256(blob).hexdigest()
+    if digest != artifact_id:
+        raise ValueError(
+            f"Artifact digest mismatch for {path}: expected={artifact_id} got={digest}"
+        )
+
+    actual_bytes = len(blob)
+    if actual_bytes != expected_bytes:
+        raise ValueError(
+            f"Artifact byte-size mismatch for {path}: expected={expected_bytes} got={actual_bytes}"
+        )
+
+    actual_records = _validate_jsonl_lines(blob, path)
+    if actual_records != expected_records:
+        raise ValueError(
+            f"Artifact record-count mismatch for {path}: expected={expected_records} got={actual_records}"
+        )
+
+    return {
+        "artifact_id": artifact_id,
+        "bytes": actual_bytes,
+        "record_count": actual_records,
+    }
+
+
 def read_jsonl_artifact(path: Path) -> list[dict[str, Any]]:
     """Read JSONL artifact records from disk."""
 

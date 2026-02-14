@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+import shutil
+from typing import Any
+
+from winnow.storage.atomic import atomic_write_json, atomic_write_text
 
 DEFAULT_STATE_ROOT = Path(".winnow/state/v1")
+DEFAULT_STATE_ROOT_V2 = Path(".winnow/state/v2")
 DEFAULT_ARTIFACT_ROOT = Path(".winnow/artifacts")
 
 
@@ -33,6 +39,10 @@ class StatePaths:
             self.queue_done,
             self.queue_failed,
         )
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def build_state_paths(root: Path) -> StatePaths:
@@ -80,3 +90,74 @@ def ensure_artifact_root(artifact_root: Path = DEFAULT_ARTIFACT_ROOT) -> Path:
 
     artifact_root.mkdir(parents=True, exist_ok=True)
     return artifact_root
+
+
+def _clear_directory(path: Path) -> None:
+    for child in path.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
+def migrate_state_v1_to_v2(
+    source_root: Path = DEFAULT_STATE_ROOT,
+    target_root: Path = DEFAULT_STATE_ROOT_V2,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Copy a v1 filesystem state tree into a v2 location.
+
+    This keeps Winnow migration-free at runtime while still allowing explicit
+    state upgrades through a deterministic copy step.
+    """
+
+    src = source_root.resolve()
+    dst = target_root.resolve()
+
+    if src == dst:
+        raise ValueError("Source and target state roots must be different.")
+    if not src.exists():
+        raise FileNotFoundError(f"Source state root does not exist: {src}")
+
+    dst.mkdir(parents=True, exist_ok=True)
+    if any(dst.iterdir()):
+        if not force:
+            raise RuntimeError(
+                f"Target state root is not empty: {dst}. Use force=True to overwrite."
+            )
+        _clear_directory(dst)
+
+    copied_dirs: list[str] = []
+    copied_files = 0
+    expected_dirs = [
+        "jobs",
+        "queue",
+        "streams",
+        "stages",
+        "events",
+        "snapshots",
+        "runtime",
+    ]
+
+    for directory_name in expected_dirs:
+        src_dir = src / directory_name
+        if not src_dir.exists():
+            continue
+        dst_dir = dst / directory_name
+        shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
+        copied_dirs.append(directory_name)
+        copied_files += sum(1 for path in src_dir.rglob("*") if path.is_file())
+
+    meta = {
+        "schema": "state-migration/v1-to-v2",
+        "migrated_at": _now(),
+        "source_root": str(src),
+        "target_root": str(dst),
+        "copied_directories": copied_dirs,
+        "copied_file_count": copied_files,
+    }
+
+    atomic_write_text(dst / "VERSION", "state/v2\n")
+    atomic_write_json(dst / "migration.json", meta)
+    return meta

@@ -6,7 +6,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from winnow.config.loader import load_pipeline_config
+from winnow.config.profiles import apply_profile
 from winnow.ingest.scanner import scan_stream
+from winnow.observability.metrics import record_queue_depth
 from winnow.storage.queue import enqueue_job
 from winnow.storage.state_store import (
     DEFAULT_ARTIFACT_ROOT,
@@ -21,9 +23,10 @@ class SubmitCommand:
 
     input: Path
     config: str | None = None
+    profile: str | None = None
     state_root: Path = DEFAULT_STATE_ROOT
     artifacts_root: Path = DEFAULT_ARTIFACT_ROOT
-    workers: int = 1
+    workers: int | None = None
     annotation_enabled: bool | None = None
     annotation_detector: str | None = None
     annotation_segmenter: str | None = None
@@ -37,6 +40,7 @@ def execute(command: SubmitCommand) -> None:
         input_path=command.input,
         strict_sequence=command.strict_sequence,
     )
+    profile = apply_profile(cfg, command.profile) if command.profile else None
     if command.annotation_enabled is not None:
         cfg.annotation.enabled = command.annotation_enabled
     if command.annotation_detector is not None:
@@ -46,15 +50,20 @@ def execute(command: SubmitCommand) -> None:
     if command.annotation_min_score is not None:
         cfg.annotation.min_score = float(command.annotation_min_score)
 
+    worker_count = max(1, int(command.workers)) if command.workers is not None else 1
+    if command.workers is None and profile is not None:
+        worker_count = profile.suggested_workers
+
     scan = scan_stream(command.input, strict_sequence=command.strict_sequence)
     paths = ensure_state_layout(command.state_root)
     payload = {
         "input": str(command.input.resolve()),
         "artifacts_root": str(command.artifacts_root.resolve()),
-        "workers": max(1, int(command.workers)),
+        "workers": worker_count,
         "frame_count": scan.frame_count,
         "missing_indices": scan.missing_indices,
         "config": asdict(cfg),
     }
     job_id = enqueue_job(paths, payload)
+    record_queue_depth(paths)
     print(f"submitted job_id={job_id} pending={paths.queue_pending / f'{job_id}.json'}")

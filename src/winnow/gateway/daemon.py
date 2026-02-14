@@ -21,7 +21,13 @@ from winnow.gateway.control import (
     write_pid,
 )
 from winnow.gateway.scheduler import process_one_pending
+from winnow.observability.logging import get_logger, log_event
+from winnow.observability.metrics import read_metrics, record_queue_depth
+from winnow.storage.snapshots import read_snapshot
 from winnow.storage.state_store import DEFAULT_STATE_ROOT, ensure_state_layout
+
+
+_LOGGER = get_logger("winnow.gateway")
 
 
 class GatewayDaemon:
@@ -47,14 +53,27 @@ class GatewayDaemon:
 
         write_pid(paths.runtime, os.getpid())
         self._install_signal_handlers()
+        record_queue_depth(paths)
+        log_event(
+            _LOGGER,
+            "gateway_started",
+            pid=os.getpid(),
+            state_root=str(paths.root.resolve()),
+            poll_interval=self.poll_interval,
+        )
 
         try:
             while not self._stop_event.is_set():
                 write_heartbeat(paths.runtime)
-                process_one_pending(paths)
+                processed = process_one_pending(paths)
+                record_queue_depth(paths)
+                if processed:
+                    log_event(_LOGGER, "gateway_processed_jobs", count=processed)
                 time.sleep(self.poll_interval)
         finally:
             clear_pid(paths.runtime)
+            record_queue_depth(paths)
+            log_event(_LOGGER, "gateway_stopped", state_root=str(paths.root.resolve()))
 
 
 def start_background(
@@ -112,16 +131,35 @@ def status(state_root: Path) -> dict[str, object]:
     pid = read_pid(paths.runtime)
     alive = bool(pid and pid_is_alive(pid))
     heartbeat = read_heartbeat(paths.runtime)
+    queue_depth = record_queue_depth(paths)
+    metrics = read_metrics(paths)
+    snapshot = read_snapshot(paths)
+
+    worker_health = {
+        "scheduler": "running" if alive else "stopped",
+        "active_jobs": queue_depth["running"],
+    }
+
     return {
         "state_root": str(paths.root.resolve()),
         "pid": pid,
         "alive": alive,
         "heartbeat": heartbeat,
-        "queue": {
-            "pending": len(list(paths.queue_pending.glob("*.json"))),
-            "running": len(list(paths.queue_running.glob("*.json"))),
-            "done": len(list(paths.queue_done.glob("*.json"))),
-            "failed": len(list(paths.queue_failed.glob("*.json"))),
+        "queue": queue_depth,
+        "backlog": queue_depth["pending"] + queue_depth["running"],
+        "worker_health": worker_health,
+        "metrics": {
+            "jobs": metrics.get("jobs", {}),
+            "stages": metrics.get("stages", {}),
+            "updated_at": metrics.get("updated_at"),
+        },
+        "snapshot": {
+            "generated_at": snapshot.get("generated_at") if isinstance(snapshot, dict) else None,
+            "events_total": (
+                snapshot.get("events", {}).get("total")
+                if isinstance(snapshot, dict)
+                else None
+            ),
         },
     }
 

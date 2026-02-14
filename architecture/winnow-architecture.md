@@ -348,6 +348,7 @@ Agentic behavior (v1.5+):
 winnow/
   architecture/
     winnow-architecture.md
+    operations-runbook.md
   src/winnow/
     __init__.py
     cli/
@@ -359,6 +360,7 @@ winnow/
     config/
       schema.py
       loader.py
+      profiles.py
     gateway/
       daemon.py
       scheduler.py

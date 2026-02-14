@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from hashlib import sha1, sha256
 import json
 from pathlib import Path
+import time
 import traceback
 from typing import Any
 from uuid import uuid4
@@ -16,9 +17,21 @@ from winnow.config.schema import DuplicateMetricConfig, IdleMetricConfig, Pipeli
 from winnow.ingest.scanner import StreamScanResult, scan_stream
 from winnow.metrics import duplicates as duplicate_metrics
 from winnow.metrics import idle as idle_metrics
+from winnow.observability.logging import get_logger, log_event
+from winnow.observability.metrics import (
+    record_job_finished,
+    record_job_started,
+    record_queue_depth,
+    record_stage_result,
+    record_stage_retry,
+)
 from winnow.pipeline.registry import resolve_stages
 from winnow.pipeline.stage import BatchInput, FrameInput, StageDefinition
-from winnow.storage.artifacts import read_jsonl_artifact, store_jsonl_artifact
+from winnow.storage.artifacts import (
+    read_jsonl_artifact,
+    store_jsonl_artifact,
+    verify_jsonl_artifact,
+)
 from winnow.storage.atomic import atomic_write_json, atomic_write_text
 from winnow.storage.checkpoints import (
     checkpoint_path,
@@ -36,6 +49,9 @@ from winnow.storage.state_store import (
     ensure_state_layout,
 )
 from winnow.workers.pool import normalize_worker_count
+
+
+_LOGGER = get_logger("winnow.executor")
 
 
 @dataclass(slots=True)
@@ -220,6 +236,9 @@ def _prepare_stage_work(
             return None
 
     attempt = int(checkpoint.get("attempt", 0)) + 1 if checkpoint else 1
+    if attempt > 1:
+        record_stage_retry(paths, stage.name)
+
     base = _stage_checkpoint_base(
         stage=stage,
         batch=batch,
@@ -263,6 +282,7 @@ def _finalize_stage_success(
         cache_key=work.cache_key,
         records=records,
     )
+    integrity = verify_jsonl_artifact(artifact)
     write_checkpoint(
         work.checkpoint_path,
         {
@@ -272,6 +292,7 @@ def _finalize_stage_success(
             "finished_at": _now(),
             "artifact": artifact,
             "record_count": artifact["record_count"],
+            "integrity": integrity,
         },
     )
     stage_stats["completed"] += 1
@@ -332,6 +353,7 @@ def _execute_stage(
 
     if max_workers <= 1 or len(prepared) == 1:
         for work in prepared:
+            started_perf = time.perf_counter()
             try:
                 records = _run_stage_runner(stage, work.batch)
             except Exception as exc:
@@ -341,24 +363,52 @@ def _execute_stage(
                     error=f"{type(exc).__name__}: {exc}",
                     tb=traceback.format_exc(),
                 )
+                record_stage_result(
+                    paths,
+                    stage_name=stage.name,
+                    status="FAILED",
+                    latency_seconds=time.perf_counter() - started_perf,
+                )
                 raise
-            _finalize_stage_success(
-                stage=stage,
-                work=work,
-                records=records,
-                artifact_root=artifact_root,
-                stage_stats=stage_stats,
+            try:
+                _finalize_stage_success(
+                    stage=stage,
+                    work=work,
+                    records=records,
+                    artifact_root=artifact_root,
+                    stage_stats=stage_stats,
+                )
+            except Exception as exc:
+                _finalize_stage_failure(
+                    work=work,
+                    stage_stats=stage_stats,
+                    error=f"{type(exc).__name__}: {exc}",
+                    tb=traceback.format_exc(),
+                )
+                record_stage_result(
+                    paths,
+                    stage_name=stage.name,
+                    status="FAILED",
+                    latency_seconds=time.perf_counter() - started_perf,
+                )
+                raise
+
+            record_stage_result(
+                paths,
+                stage_name=stage.name,
+                status="SUCCEEDED",
+                latency_seconds=time.perf_counter() - started_perf,
             )
         return
 
     first_error: Exception | None = None
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        future_map: dict[Future[list[dict[str, Any]]], _StageWorkItem] = {
-            executor.submit(_run_stage_runner, stage, work.batch): work
+        future_map: dict[Future[list[dict[str, Any]]], tuple[_StageWorkItem, float]] = {
+            executor.submit(_run_stage_runner, stage, work.batch): (work, time.perf_counter())
             for work in prepared
         }
         for future in as_completed(future_map):
-            work = future_map[future]
+            work, started_perf = future_map[future]
             try:
                 records = future.result()
             except Exception as exc:
@@ -368,16 +418,46 @@ def _execute_stage(
                     error=f"{type(exc).__name__}: {exc}",
                     tb="".join(traceback.format_exception(exc)),
                 )
+                record_stage_result(
+                    paths,
+                    stage_name=stage.name,
+                    status="FAILED",
+                    latency_seconds=time.perf_counter() - started_perf,
+                )
                 if first_error is None:
                     first_error = exc
                 continue
 
-            _finalize_stage_success(
-                stage=stage,
-                work=work,
-                records=records,
-                artifact_root=artifact_root,
-                stage_stats=stage_stats,
+            try:
+                _finalize_stage_success(
+                    stage=stage,
+                    work=work,
+                    records=records,
+                    artifact_root=artifact_root,
+                    stage_stats=stage_stats,
+                )
+            except Exception as exc:
+                _finalize_stage_failure(
+                    work=work,
+                    stage_stats=stage_stats,
+                    error=f"{type(exc).__name__}: {exc}",
+                    tb=traceback.format_exc(),
+                )
+                record_stage_result(
+                    paths,
+                    stage_name=stage.name,
+                    status="FAILED",
+                    latency_seconds=time.perf_counter() - started_perf,
+                )
+                if first_error is None:
+                    first_error = exc
+                continue
+
+            record_stage_result(
+                paths,
+                stage_name=stage.name,
+                status="SUCCEEDED",
+                latency_seconds=time.perf_counter() - started_perf,
             )
 
     if first_error is not None:
@@ -662,13 +742,14 @@ def execute_pipeline_job(
     }
     stage_outputs: dict[str, Any] = {}
 
+    started_at = _now()
     running_record: dict[str, Any] = {
         "job_id": job_id,
         "status": "RUNNING",
         "mode": mode,
         "submitted_at": submitted_at,
-        "updated_at": _now(),
-        "started_at": _now(),
+        "updated_at": started_at,
+        "started_at": started_at,
         "input": str(input_path.resolve()),
         "stream_id": stream_id,
         "frame_count": len(frames),
@@ -682,7 +763,28 @@ def execute_pipeline_job(
     if existing_job and "payload" in existing_job:
         running_record["payload"] = existing_job["payload"]
     write_job(paths, job_id, running_record)
-    append_event(paths, {"event": "pipeline_started", "job_id": job_id, "mode": mode})
+    record_job_started(paths)
+    record_queue_depth(paths)
+    append_event(
+        paths,
+        {
+            "event": "pipeline_started",
+            "job_id": job_id,
+            "mode": mode,
+            "correlation_id": job_id,
+        },
+    )
+    log_event(
+        _LOGGER,
+        "pipeline_started",
+        job_id=job_id,
+        correlation_id=job_id,
+        mode=mode,
+        stream_id=stream_id,
+        frame_count=len(frames),
+        batch_count=len(batches),
+        workers=worker_count,
+    )
 
     try:
         for stage in stages:
@@ -709,9 +811,18 @@ def execute_pipeline_job(
                     {
                         "event": "stage_globalized",
                         "job_id": job_id,
+                        "correlation_id": job_id,
                         "stage": stage.name,
                         "record_count": global_output["record_count"],
                     },
+                )
+                log_event(
+                    _LOGGER,
+                    "stage_globalized",
+                    job_id=job_id,
+                    correlation_id=job_id,
+                    stage=stage.name,
+                    record_count=global_output["record_count"],
                 )
 
         success_record = {
@@ -724,7 +835,25 @@ def execute_pipeline_job(
             "stage_outputs": stage_outputs,
         }
         write_job(paths, job_id, success_record)
-        append_event(paths, {"event": "pipeline_finished", "job_id": job_id, "status": "SUCCEEDED"})
+        record_job_finished(paths, "SUCCEEDED")
+        record_queue_depth(paths)
+        append_event(
+            paths,
+            {
+                "event": "pipeline_finished",
+                "job_id": job_id,
+                "correlation_id": job_id,
+                "status": "SUCCEEDED",
+            },
+        )
+        log_event(
+            _LOGGER,
+            "pipeline_finished",
+            job_id=job_id,
+            correlation_id=job_id,
+            status="SUCCEEDED",
+            stage_stats=stage_stats,
+        )
         return success_record
 
     except Exception as exc:
@@ -739,7 +868,26 @@ def execute_pipeline_job(
             "stage_outputs": stage_outputs,
         }
         write_job(paths, job_id, failed_record)
-        append_event(paths, {"event": "pipeline_finished", "job_id": job_id, "status": "FAILED"})
+        record_job_finished(paths, "FAILED")
+        record_queue_depth(paths)
+        append_event(
+            paths,
+            {
+                "event": "pipeline_finished",
+                "job_id": job_id,
+                "correlation_id": job_id,
+                "status": "FAILED",
+            },
+        )
+        log_event(
+            _LOGGER,
+            "pipeline_finished",
+            level=40,
+            job_id=job_id,
+            correlation_id=job_id,
+            status="FAILED",
+            error=f"{type(exc).__name__}: {exc}",
+        )
         if raise_on_error:
             raise
         return failed_record

@@ -11,7 +11,14 @@ import tyro
 
 from winnow.gateway.daemon import GatewayDaemon, start_background, status, stop_background
 from winnow.gateway.service_install import render_launchd_plist, render_systemd_unit
-from winnow.storage.state_store import DEFAULT_STATE_ROOT, ensure_state_layout
+from winnow.storage.events import compact_events
+from winnow.storage.snapshots import rebuild_snapshot
+from winnow.storage.state_store import (
+    DEFAULT_STATE_ROOT,
+    DEFAULT_STATE_ROOT_V2,
+    ensure_state_layout,
+    migrate_state_v1_to_v2,
+)
 
 
 @dataclass(slots=True)
@@ -48,6 +55,31 @@ class GatewayInstallServiceCommand:
     poll_interval: Annotated[float, tyro.conf.arg(prefix_name=False)] = 1.0
 
 
+@dataclass(slots=True)
+class GatewaySnapshotCommand:
+    """Rebuild a state snapshot from jobs/checkpoints/events."""
+
+    state_root: Annotated[Path, tyro.conf.arg(prefix_name=False)] = DEFAULT_STATE_ROOT
+    name: Annotated[str, tyro.conf.arg(prefix_name=False)] = "state-latest.json"
+
+
+@dataclass(slots=True)
+class GatewayCompactEventsCommand:
+    """Compact older event journals into archived files."""
+
+    state_root: Annotated[Path, tyro.conf.arg(prefix_name=False)] = DEFAULT_STATE_ROOT
+    keep_recent_days: Annotated[int, tyro.conf.arg(prefix_name=False)] = 1
+
+
+@dataclass(slots=True)
+class GatewayMigrateStateCommand:
+    """Copy filesystem state from v1 into a v2 target root."""
+
+    source_root: Annotated[Path, tyro.conf.arg(prefix_name=False)] = DEFAULT_STATE_ROOT
+    target_root: Annotated[Path, tyro.conf.arg(prefix_name=False)] = DEFAULT_STATE_ROOT_V2
+    force: Annotated[bool, tyro.conf.arg(prefix_name=False)] = False
+
+
 GatewaySubcommand = Annotated[
     GatewayStartCommand,
     tyro.conf.subcommand(name="start", prefix_name=False),
@@ -60,6 +92,15 @@ GatewaySubcommand = Annotated[
 ] | Annotated[
     GatewayInstallServiceCommand,
     tyro.conf.subcommand(name="install-service", prefix_name=False),
+] | Annotated[
+    GatewaySnapshotCommand,
+    tyro.conf.subcommand(name="snapshot", prefix_name=False),
+] | Annotated[
+    GatewayCompactEventsCommand,
+    tyro.conf.subcommand(name="compact-events", prefix_name=False),
+] | Annotated[
+    GatewayMigrateStateCommand,
+    tyro.conf.subcommand(name="migrate-state", prefix_name=False),
 ]
 
 
@@ -122,6 +163,27 @@ def execute(command: GatewayCommand) -> None:
         launchd_path.write_text(launchd, encoding="utf-8")
         print(f"wrote {systemd_path}")
         print(f"wrote {launchd_path}")
+        return
+
+    if isinstance(sub, GatewaySnapshotCommand):
+        paths = ensure_state_layout(sub.state_root)
+        result = rebuild_snapshot(paths, name=sub.name)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return
+
+    if isinstance(sub, GatewayCompactEventsCommand):
+        paths = ensure_state_layout(sub.state_root)
+        result = compact_events(paths, keep_recent_days=sub.keep_recent_days)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return
+
+    if isinstance(sub, GatewayMigrateStateCommand):
+        result = migrate_state_v1_to_v2(
+            source_root=sub.source_root,
+            target_root=sub.target_root,
+            force=sub.force,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
         return
 
     raise TypeError(f"Unsupported gateway command type: {type(sub).__name__}")

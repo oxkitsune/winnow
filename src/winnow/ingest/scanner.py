@@ -26,7 +26,11 @@ class StreamScanResult:
 
 
 def scan_stream(stream_path: Path, strict_sequence: bool = True) -> StreamScanResult:
-    """Return ordered frames and sequence diagnostics for a stream directory."""
+    """Return ordered frames and sequence diagnostics for a stream directory.
+
+    Sequence gaps are tolerated: missing indices are recorded in diagnostics
+    but never block ingestion.
+    """
 
     if not stream_path.exists():
         raise FileNotFoundError(f"Input stream path does not exist: {stream_path}")
@@ -48,9 +52,5 @@ def scan_stream(stream_path: Path, strict_sequence: bool = True) -> StreamScanRe
 
     if strict_sequence and not parsed:
         raise ValueError(f"No files matching image_<idx> pattern found in {stream_path}")
-    if strict_sequence and missing:
-        joined = ", ".join(str(x) for x in missing[:20])
-        suffix = "" if len(missing) <= 20 else ", ..."
-        raise ValueError(f"Sequence gaps detected: {joined}{suffix}")
 
     return StreamScanResult(stream_path=stream_path, frames=parsed, missing_indices=missing)
