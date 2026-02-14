@@ -8,7 +8,11 @@ from pathlib import Path
 from winnow.config.loader import load_pipeline_config
 from winnow.ingest.scanner import scan_stream
 from winnow.storage.queue import enqueue_job
-from winnow.storage.state_store import DEFAULT_STATE_ROOT, ensure_state_layout
+from winnow.storage.state_store import (
+    DEFAULT_ARTIFACT_ROOT,
+    DEFAULT_STATE_ROOT,
+    ensure_state_layout,
+)
 
 
 @dataclass(slots=True)
@@ -18,6 +22,7 @@ class SubmitCommand:
     input: Path
     config: str | None = None
     state_root: Path = DEFAULT_STATE_ROOT
+    artifacts_root: Path = DEFAULT_ARTIFACT_ROOT
     strict_sequence: bool = True
 
 
@@ -31,6 +36,7 @@ def execute(command: SubmitCommand) -> None:
     paths = ensure_state_layout(command.state_root)
     payload = {
         "input": str(command.input.resolve()),
+        "artifacts_root": str(command.artifacts_root.resolve()),
         "frame_count": scan.frame_count,
         "missing_indices": scan.missing_indices,
         "config": asdict(cfg),

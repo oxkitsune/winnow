@@ -29,6 +29,20 @@ def atomic_write_json(path: Path, payload: Any, indent: int = 2) -> None:
     atomic_write_text(path, json.dumps(payload, indent=indent, sort_keys=True) + "\n")
 
 
+def atomic_write_bytes(path: Path, content: bytes) -> None:
+    """Write bytes atomically using a temp file + rename."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+
 def atomic_move(src: Path, dst: Path) -> None:
     """Move a file atomically within a filesystem."""
 

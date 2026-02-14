@@ -9,7 +9,14 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from winnow.config.schema import IngestConfig, PipelineConfig
+from winnow.config.schema import (
+    AnnotationConfig,
+    BlurMetricConfig,
+    DarknessMetricConfig,
+    DuplicateMetricConfig,
+    IngestConfig,
+    PipelineConfig,
+)
 
 
 def _load_module(module_ref: str) -> ModuleType:
@@ -76,3 +83,21 @@ def load_pipeline_config(
     loaded.ingest.root = str(input_path.resolve())
     loaded.ingest.strict_sequence = strict_sequence
     return loaded
+
+
+def pipeline_config_from_dict(payload: dict[str, Any]) -> PipelineConfig:
+    """Reconstruct a PipelineConfig from a plain dictionary."""
+
+    ingest = payload.get("ingest", {})
+    blur = payload.get("blur", {})
+    darkness = payload.get("darkness", {})
+    duplicate = payload.get("duplicate", {})
+    annotation = payload.get("annotation", {})
+    return PipelineConfig(
+        ingest=IngestConfig(**ingest),
+        blur=BlurMetricConfig(**blur),
+        darkness=DarknessMetricConfig(**darkness),
+        duplicate=DuplicateMetricConfig(**duplicate),
+        annotation=AnnotationConfig(**annotation),
+        batch_size=int(payload.get("batch_size", 512)),
+    )
