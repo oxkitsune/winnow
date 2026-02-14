@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from hashlib import sha1, sha256
 import json
+import os
 from pathlib import Path
 import time
 import traceback
@@ -253,6 +254,7 @@ def _prepare_stage_work(
             **base,
             "status": "RUNNING",
             "started_at": started_at,
+            "coordinator_pid": os.getpid(),
         },
     )
 
@@ -270,6 +272,7 @@ def _finalize_stage_success(
     stage: StageDefinition,
     work: _StageWorkItem,
     records: list[dict[str, Any]],
+    worker_pid: int,
     artifact_root: Path,
     stage_stats: dict[str, int],
 ) -> None:
@@ -293,6 +296,7 @@ def _finalize_stage_success(
             "artifact": artifact,
             "record_count": artifact["record_count"],
             "integrity": integrity,
+            "worker_pid": worker_pid,
         },
     )
     stage_stats["completed"] += 1
@@ -304,17 +308,22 @@ def _finalize_stage_failure(
     stage_stats: dict[str, int],
     error: str,
     tb: str,
+    worker_pid: int | None,
 ) -> None:
+    payload = {
+        **work.checkpoint_base,
+        "status": "FAILED",
+        "started_at": work.started_at,
+        "finished_at": _now(),
+        "error": error,
+        "traceback": tb,
+    }
+    if worker_pid is not None:
+        payload["worker_pid"] = worker_pid
+
     write_checkpoint(
         work.checkpoint_path,
-        {
-            **work.checkpoint_base,
-            "status": "FAILED",
-            "started_at": work.started_at,
-            "finished_at": _now(),
-            "error": error,
-            "traceback": tb,
-        },
+        payload,
     )
     stage_stats["failed"] += 1
 
@@ -322,10 +331,10 @@ def _finalize_stage_failure(
 def _run_stage_runner(
     stage: StageDefinition,
     batch: BatchInput,
-) -> list[dict[str, Any]]:
+) -> tuple[int, list[dict[str, Any]]]:
     """Worker-safe stage runner invocation."""
 
-    return stage.runner(batch, stage.config)
+    return os.getpid(), stage.runner(batch, stage.config)
 
 
 def _execute_stage(
@@ -355,13 +364,14 @@ def _execute_stage(
         for work in prepared:
             started_perf = time.perf_counter()
             try:
-                records = _run_stage_runner(stage, work.batch)
+                worker_pid, records = _run_stage_runner(stage, work.batch)
             except Exception as exc:
                 _finalize_stage_failure(
                     work=work,
                     stage_stats=stage_stats,
                     error=f"{type(exc).__name__}: {exc}",
                     tb=traceback.format_exc(),
+                    worker_pid=os.getpid(),
                 )
                 record_stage_result(
                     paths,
@@ -375,6 +385,7 @@ def _execute_stage(
                     stage=stage,
                     work=work,
                     records=records,
+                    worker_pid=worker_pid,
                     artifact_root=artifact_root,
                     stage_stats=stage_stats,
                 )
@@ -384,6 +395,7 @@ def _execute_stage(
                     stage_stats=stage_stats,
                     error=f"{type(exc).__name__}: {exc}",
                     tb=traceback.format_exc(),
+                    worker_pid=worker_pid,
                 )
                 record_stage_result(
                     paths,
@@ -403,20 +415,21 @@ def _execute_stage(
 
     first_error: Exception | None = None
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        future_map: dict[Future[list[dict[str, Any]]], tuple[_StageWorkItem, float]] = {
+        future_map: dict[Future[tuple[int, list[dict[str, Any]]]], tuple[_StageWorkItem, float]] = {
             executor.submit(_run_stage_runner, stage, work.batch): (work, time.perf_counter())
             for work in prepared
         }
         for future in as_completed(future_map):
             work, started_perf = future_map[future]
             try:
-                records = future.result()
+                worker_pid, records = future.result()
             except Exception as exc:
                 _finalize_stage_failure(
                     work=work,
                     stage_stats=stage_stats,
                     error=f"{type(exc).__name__}: {exc}",
                     tb="".join(traceback.format_exception(exc)),
+                    worker_pid=None,
                 )
                 record_stage_result(
                     paths,
@@ -433,6 +446,7 @@ def _execute_stage(
                     stage=stage,
                     work=work,
                     records=records,
+                    worker_pid=worker_pid,
                     artifact_root=artifact_root,
                     stage_stats=stage_stats,
                 )
@@ -442,6 +456,7 @@ def _execute_stage(
                     stage_stats=stage_stats,
                     error=f"{type(exc).__name__}: {exc}",
                     tb=traceback.format_exc(),
+                    worker_pid=worker_pid,
                 )
                 record_stage_result(
                     paths,

@@ -11,6 +11,7 @@ import tyro
 
 from winnow.gateway.daemon import GatewayDaemon, start_background, status, stop_background
 from winnow.gateway.service_install import render_launchd_plist, render_systemd_unit
+from winnow.gateway.tui import run_gateway_tui
 from winnow.storage.events import compact_events
 from winnow.storage.snapshots import rebuild_snapshot
 from winnow.storage.state_store import (
@@ -80,6 +81,18 @@ class GatewayMigrateStateCommand:
     force: Annotated[bool, tyro.conf.arg(prefix_name=False)] = False
 
 
+@dataclass(slots=True)
+class GatewayTuiCommand:
+    """Run an interactive monitor for gateway and jobs."""
+
+    state_root: Annotated[Path, tyro.conf.arg(prefix_name=False)] = DEFAULT_STATE_ROOT
+    refresh_interval: Annotated[float, tyro.conf.arg(prefix_name=False)] = 1.0
+    poll_interval: Annotated[float, tyro.conf.arg(prefix_name=False)] = 1.0
+    log_file: Annotated[Path | None, tyro.conf.arg(prefix_name=False)] = None
+    show_all_jobs: Annotated[bool, tyro.conf.arg(prefix_name=False)] = False
+    events_limit: Annotated[int, tyro.conf.arg(prefix_name=False)] = 200
+
+
 GatewaySubcommand = Annotated[
     GatewayStartCommand,
     tyro.conf.subcommand(name="start", prefix_name=False),
@@ -101,6 +114,9 @@ GatewaySubcommand = Annotated[
 ] | Annotated[
     GatewayMigrateStateCommand,
     tyro.conf.subcommand(name="migrate-state", prefix_name=False),
+] | Annotated[
+    GatewayTuiCommand,
+    tyro.conf.subcommand(name="tui", prefix_name=False),
 ]
 
 
@@ -184,6 +200,17 @@ def execute(command: GatewayCommand) -> None:
             force=sub.force,
         )
         print(json.dumps(result, indent=2, sort_keys=True))
+        return
+
+    if isinstance(sub, GatewayTuiCommand):
+        run_gateway_tui(
+            state_root=sub.state_root,
+            refresh_interval=sub.refresh_interval,
+            poll_interval=sub.poll_interval,
+            log_file=sub.log_file,
+            show_all_jobs=sub.show_all_jobs,
+            events_limit=sub.events_limit,
+        )
         return
 
     raise TypeError(f"Unsupported gateway command type: {type(sub).__name__}")

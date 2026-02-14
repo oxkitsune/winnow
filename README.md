@@ -36,8 +36,20 @@ Daemon mode:
 uv run winnow gateway start
 uv run winnow submit --input /path/to/stream --profile high-throughput
 uv run winnow gateway status
+uv run winnow gateway tui
 uv run winnow gateway stop
 ```
+
+Gateway Textual TUI controls:
+
+- `q`: quit
+- `Enter`: open selected job detail screen
+- `Esc` or `Backspace`: return to job list
+- `s`: start/stop gateway daemon
+- `a`: toggle active jobs vs all jobs
+- `e`: toggle events scoped to selected job vs all jobs
+- `r`: refresh immediately
+- `j`/`k` or arrow keys: change selected job
 
 Inspection and export:
 
