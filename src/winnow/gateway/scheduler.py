@@ -61,6 +61,7 @@ def process_one_pending(paths: StatePaths) -> int:
         input_path = Path(payload["input"])
         cfg = pipeline_config_from_dict(payload["config"])
         artifacts_root = Path(payload.get("artifacts_root", str(DEFAULT_ARTIFACT_ROOT)))
+        workers = int(payload.get("workers", 1))
 
         result = execute_pipeline_job(
             input_path=input_path,
@@ -69,6 +70,7 @@ def process_one_pending(paths: StatePaths) -> int:
             artifacts_root=artifacts_root,
             job_id=job_id,
             mode="daemon",
+            max_workers=workers,
             raise_on_error=False,
         )
     except Exception as exc:

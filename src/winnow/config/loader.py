@@ -13,6 +13,7 @@ from winnow.config.schema import (
     AnnotationConfig,
     BlurMetricConfig,
     DarknessMetricConfig,
+    IdleMetricConfig,
     DuplicateMetricConfig,
     IngestConfig,
     PipelineConfig,
@@ -92,12 +93,14 @@ def pipeline_config_from_dict(payload: dict[str, Any]) -> PipelineConfig:
     blur = payload.get("blur", {})
     darkness = payload.get("darkness", {})
     duplicate = payload.get("duplicate", {})
+    idle = payload.get("idle", {})
     annotation = payload.get("annotation", {})
     return PipelineConfig(
         ingest=IngestConfig(**ingest),
         blur=BlurMetricConfig(**blur),
         darkness=DarknessMetricConfig(**darkness),
         duplicate=DuplicateMetricConfig(**duplicate),
+        idle=IdleMetricConfig(**idle),
         annotation=AnnotationConfig(**annotation),
         batch_size=int(payload.get("batch_size", 512)),
     )

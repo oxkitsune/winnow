@@ -23,6 +23,7 @@ class SubmitCommand:
     config: str | None = None
     state_root: Path = DEFAULT_STATE_ROOT
     artifacts_root: Path = DEFAULT_ARTIFACT_ROOT
+    workers: int = 1
     strict_sequence: bool = True
 
 
@@ -37,6 +38,7 @@ def execute(command: SubmitCommand) -> None:
     payload = {
         "input": str(command.input.resolve()),
         "artifacts_root": str(command.artifacts_root.resolve()),
+        "workers": max(1, int(command.workers)),
         "frame_count": scan.frame_count,
         "missing_indices": scan.missing_indices,
         "config": asdict(cfg),

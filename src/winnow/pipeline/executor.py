@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass
+from concurrent.futures import Future, ProcessPoolExecutor, as_completed
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from hashlib import sha1, sha256
 import json
@@ -28,9 +29,22 @@ from winnow.storage.queue import read_job, write_job
 from winnow.storage.state_store import (
     DEFAULT_ARTIFACT_ROOT,
     DEFAULT_STATE_ROOT,
+    StatePaths,
     ensure_artifact_root,
     ensure_state_layout,
 )
+from winnow.workers.pool import normalize_worker_count
+
+
+@dataclass(slots=True)
+class _StageWorkItem:
+    """Resolved work unit for one stage and batch partition."""
+
+    batch: BatchInput
+    cache_key: str
+    checkpoint_path: Path
+    checkpoint_base: dict[str, Any]
+    started_at: str
 
 
 def _now() -> str:
@@ -167,14 +181,13 @@ def _stage_checkpoint_base(
     }
 
 
-def _process_stage_batch(
+def _prepare_stage_work(
     *,
     stage: StageDefinition,
     batch: BatchInput,
-    paths,
-    artifact_root: Path,
+    paths: StatePaths,
     stage_stats: dict[str, int],
-) -> None:
+) -> _StageWorkItem | None:
     cache_key = _build_cache_key(stage, batch)
     ckpt_path = checkpoint_path(
         paths=paths,
@@ -191,7 +204,7 @@ def _process_stage_batch(
         artifact_uri = artifact.get("uri") if isinstance(artifact, dict) else None
         if artifact_uri and Path(artifact_uri).exists():
             stage_stats["skipped"] += 1
-            return
+            return None
 
     attempt = int(checkpoint.get("attempt", 0)) + 1 if checkpoint else 1
     base = _stage_checkpoint_base(
@@ -211,44 +224,151 @@ def _process_stage_batch(
         },
     )
 
-    try:
-        records = stage.runner(batch, stage.config)
-        artifact = store_jsonl_artifact(
-            artifact_root,
-            stage_name=stage.name,
-            stream_id=batch.stream_id,
-            batch_start=batch.start_idx,
-            batch_end=batch.end_idx,
-            cache_key=cache_key,
-            records=records,
-        )
-    except Exception as exc:
-        write_checkpoint(
-            ckpt_path,
-            {
-                **base,
-                "status": "FAILED",
-                "started_at": started_at,
-                "finished_at": _now(),
-                "error": f"{type(exc).__name__}: {exc}",
-                "traceback": traceback.format_exc(),
-            },
-        )
-        stage_stats["failed"] += 1
-        raise
+    return _StageWorkItem(
+        batch=batch,
+        cache_key=cache_key,
+        checkpoint_path=ckpt_path,
+        checkpoint_base=base,
+        started_at=started_at,
+    )
 
+
+def _finalize_stage_success(
+    *,
+    stage: StageDefinition,
+    work: _StageWorkItem,
+    records: list[dict[str, Any]],
+    artifact_root: Path,
+    stage_stats: dict[str, int],
+) -> None:
+    artifact = store_jsonl_artifact(
+        artifact_root,
+        stage_name=stage.name,
+        stream_id=work.batch.stream_id,
+        batch_start=work.batch.start_idx,
+        batch_end=work.batch.end_idx,
+        cache_key=work.cache_key,
+        records=records,
+    )
     write_checkpoint(
-        ckpt_path,
+        work.checkpoint_path,
         {
-            **base,
+            **work.checkpoint_base,
             "status": "SUCCEEDED",
-            "started_at": started_at,
+            "started_at": work.started_at,
             "finished_at": _now(),
             "artifact": artifact,
             "record_count": artifact["record_count"],
         },
     )
     stage_stats["completed"] += 1
+
+
+def _finalize_stage_failure(
+    *,
+    work: _StageWorkItem,
+    stage_stats: dict[str, int],
+    error: str,
+    tb: str,
+) -> None:
+    write_checkpoint(
+        work.checkpoint_path,
+        {
+            **work.checkpoint_base,
+            "status": "FAILED",
+            "started_at": work.started_at,
+            "finished_at": _now(),
+            "error": error,
+            "traceback": tb,
+        },
+    )
+    stage_stats["failed"] += 1
+
+
+def _run_stage_runner(
+    stage: StageDefinition,
+    batch: BatchInput,
+) -> list[dict[str, Any]]:
+    """Worker-safe stage runner invocation."""
+
+    return stage.runner(batch, stage.config)
+
+
+def _execute_stage(
+    *,
+    stage: StageDefinition,
+    batches: list[BatchInput],
+    paths: StatePaths,
+    artifact_root: Path,
+    stage_stats: dict[str, int],
+    max_workers: int,
+) -> None:
+    prepared: list[_StageWorkItem] = []
+    for batch in batches:
+        work = _prepare_stage_work(
+            stage=stage,
+            batch=batch,
+            paths=paths,
+            stage_stats=stage_stats,
+        )
+        if work is not None:
+            prepared.append(work)
+
+    if not prepared:
+        return
+
+    if max_workers <= 1 or len(prepared) == 1:
+        for work in prepared:
+            try:
+                records = _run_stage_runner(stage, work.batch)
+            except Exception as exc:
+                _finalize_stage_failure(
+                    work=work,
+                    stage_stats=stage_stats,
+                    error=f"{type(exc).__name__}: {exc}",
+                    tb=traceback.format_exc(),
+                )
+                raise
+            _finalize_stage_success(
+                stage=stage,
+                work=work,
+                records=records,
+                artifact_root=artifact_root,
+                stage_stats=stage_stats,
+            )
+        return
+
+    first_error: Exception | None = None
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        future_map: dict[Future[list[dict[str, Any]]], _StageWorkItem] = {
+            executor.submit(_run_stage_runner, stage, work.batch): work
+            for work in prepared
+        }
+        for future in as_completed(future_map):
+            work = future_map[future]
+            try:
+                records = future.result()
+            except Exception as exc:
+                _finalize_stage_failure(
+                    work=work,
+                    stage_stats=stage_stats,
+                    error=f"{type(exc).__name__}: {exc}",
+                    tb="".join(traceback.format_exception(exc)),
+                )
+                if first_error is None:
+                    first_error = exc
+                continue
+
+            _finalize_stage_success(
+                stage=stage,
+                work=work,
+                records=records,
+                artifact_root=artifact_root,
+                stage_stats=stage_stats,
+            )
+
+    if first_error is not None:
+        raise RuntimeError(f"Stage {stage.name} failed: {first_error}")
 
 
 def execute_pipeline_job(
@@ -259,12 +379,14 @@ def execute_pipeline_job(
     artifacts_root: Path = DEFAULT_ARTIFACT_ROOT,
     job_id: str | None = None,
     mode: str = "direct",
+    max_workers: int = 1,
     raise_on_error: bool = True,
 ) -> dict[str, Any]:
     """Execute blur+darkness pipeline for one stream folder."""
 
     paths = ensure_state_layout(state_root)
     artifact_root = ensure_artifact_root(artifacts_root)
+    worker_count = normalize_worker_count(max_workers)
 
     if job_id is None:
         job_id = uuid4().hex
@@ -307,6 +429,7 @@ def execute_pipeline_job(
         "frame_count": len(frames),
         "batch_size": config.batch_size,
         "batch_count": len(batches),
+        "max_workers": worker_count,
         "config": asdict(config),
         "stage_stats": stage_stats,
     }
@@ -317,15 +440,14 @@ def execute_pipeline_job(
 
     try:
         for stage in stages:
-            stats = stage_stats[stage.name]
-            for batch in batches:
-                _process_stage_batch(
-                    stage=stage,
-                    batch=batch,
-                    paths=paths,
-                    artifact_root=artifact_root,
-                    stage_stats=stats,
-                )
+            _execute_stage(
+                stage=stage,
+                batches=batches,
+                paths=paths,
+                artifact_root=artifact_root,
+                stage_stats=stage_stats[stage.name],
+                max_workers=worker_count,
+            )
 
         success_record = {
             **running_record,

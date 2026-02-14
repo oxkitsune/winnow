@@ -18,6 +18,7 @@ class RunCommand:
     config: str | None = None
     state_root: Path = DEFAULT_STATE_ROOT
     artifacts_root: Path = DEFAULT_ARTIFACT_ROOT
+    workers: int = 1
     strict_sequence: bool = True
 
 
@@ -33,8 +34,10 @@ def execute(command: RunCommand) -> None:
         state_root=command.state_root,
         artifacts_root=command.artifacts_root,
         mode="direct",
+        max_workers=command.workers,
     )
     print(
         f"run job_id={result['job_id']} status={result['status']} "
-        f"frames={result['frame_count']} batches={result['batch_count']}"
+        f"frames={result['frame_count']} batches={result['batch_count']} "
+        f"workers={result['max_workers']}"
     )

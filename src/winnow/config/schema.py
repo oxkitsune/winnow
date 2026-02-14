@@ -33,9 +33,20 @@ class DarknessMetricConfig:
 class DuplicateMetricConfig:
     """Duplicate detection options."""
 
+    enabled: bool = True
     phash_hamming_threshold: int = 6
     embedding_model: str = "clip-vit-large-patch14"
     ann_index: Literal["faiss_flat", "faiss_ivf"] = "faiss_ivf"
+
+
+@dataclass(slots=True)
+class IdleMetricConfig:
+    """Idle period detection options."""
+
+    enabled: bool = True
+    motion_threshold: float = 0.02
+    smoothing_window: int = 5
+    min_run: int = 8
 
 
 @dataclass(slots=True)
@@ -56,5 +67,6 @@ class PipelineConfig:
     blur: BlurMetricConfig = field(default_factory=BlurMetricConfig)
     darkness: DarknessMetricConfig = field(default_factory=DarknessMetricConfig)
     duplicate: DuplicateMetricConfig = field(default_factory=DuplicateMetricConfig)
+    idle: IdleMetricConfig = field(default_factory=IdleMetricConfig)
     annotation: AnnotationConfig = field(default_factory=AnnotationConfig)
     batch_size: int = 512
