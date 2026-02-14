@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from winnow.annotation import orchestrator
 from winnow.config.schema import PipelineConfig
 from winnow.metrics import blur, darkness, duplicates, idle
 from winnow.pipeline.stage import StageDefinition
@@ -40,6 +41,15 @@ def default_stage_sequence(config: PipelineConfig) -> list[StageDefinition]:
                 version="v1",
                 config=config.idle,
                 runner=idle.run,
+            )
+        )
+    if config.annotation.enabled:
+        stages.append(
+            StageDefinition(
+                name="annotation",
+                version="v1",
+                config=config.annotation,
+                runner=orchestrator.run,
             )
         )
     return stages

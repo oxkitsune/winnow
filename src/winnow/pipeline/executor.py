@@ -439,7 +439,44 @@ def _globalize_stage_records(
         return duplicate_metrics.globalize(records=records, config=stage.config, stream_id=stream_id)
     if stage.name == "idle" and isinstance(stage.config, IdleMetricConfig):
         return idle_metrics.globalize(records=records, config=stage.config, stream_id=stream_id)
+    if stage.name == "annotation":
+        ordered = [dict(record) for record in records]
+        ordered.sort(key=lambda item: int(item.get("frame_idx", 0)))
+        return ordered
     return None
+
+
+def _build_annotation_summary(
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    frame_count = 0
+    annotation_count = 0
+    category_counts: dict[str, int] = {}
+
+    for record in records:
+        frame_count += 1
+        items = record.get("annotations", [])
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            annotation_count += 1
+            label = item.get("label")
+            if isinstance(label, str):
+                category_counts[label] = category_counts.get(label, 0) + 1
+
+    categories = [
+        {"label": label, "count": category_counts[label]}
+        for label in sorted(category_counts)
+    ]
+    return [
+        {
+            "frame_count": frame_count,
+            "annotation_count": annotation_count,
+            "categories": categories,
+        }
+    ]
 
 
 def _build_duplicate_cluster_records(
@@ -506,6 +543,8 @@ def _build_stage_summaries(
         return [("clusters", _build_duplicate_cluster_records(global_records))]
     if stage.name == "idle":
         return [("intervals", _build_idle_interval_records(global_records))]
+    if stage.name == "annotation":
+        return [("summary", _build_annotation_summary(global_records))]
     return []
 
 

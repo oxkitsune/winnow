@@ -47,6 +47,14 @@ class InspectIdleCommand:
     state_root: Annotated[Path, tyro.conf.arg(prefix_name=False)] = DEFAULT_STATE_ROOT
 
 
+@dataclass(slots=True)
+class InspectAnnotationsCommand:
+    """Inspect global frame annotations for a completed job."""
+
+    job_id: Annotated[str, tyro.conf.arg(prefix_name=False)]
+    state_root: Annotated[Path, tyro.conf.arg(prefix_name=False)] = DEFAULT_STATE_ROOT
+
+
 InspectSubcommand = Annotated[
     InspectJobCommand,
     tyro.conf.subcommand(name="job", prefix_name=False),
@@ -59,6 +67,9 @@ InspectSubcommand = Annotated[
 ] | Annotated[
     InspectIdleCommand,
     tyro.conf.subcommand(name="idle", prefix_name=False),
+] | Annotated[
+    InspectAnnotationsCommand,
+    tyro.conf.subcommand(name="annotations", prefix_name=False),
 ]
 
 
@@ -131,6 +142,27 @@ def execute(command: InspectCommand) -> None:
             "job_id": sub.job_id,
             "interval_count": len(records),
             "intervals": records,
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
+    if isinstance(sub, InspectAnnotationsCommand):
+        paths = ensure_state_layout(sub.state_root)
+        job_path = paths.jobs / f"{sub.job_id}.json"
+        if not job_path.exists():
+            raise FileNotFoundError(f"Unknown job id: {sub.job_id}")
+        job = read_json(job_path)
+        stage_outputs = job.get("stage_outputs", {})
+        annotation_output = stage_outputs.get("annotation", {})
+        artifact = annotation_output.get("artifact", {})
+        uri = artifact.get("uri")
+        if not isinstance(uri, str):
+            raise RuntimeError("Job has no annotation global artifact.")
+        records = read_jsonl_artifact(Path(uri))
+        payload = {
+            "job_id": sub.job_id,
+            "frame_count": len(records),
+            "frames": records,
         }
         print(json.dumps(payload, indent=2, sort_keys=True))
         return

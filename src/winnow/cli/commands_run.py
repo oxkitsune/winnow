@@ -19,6 +19,10 @@ class RunCommand:
     state_root: Path = DEFAULT_STATE_ROOT
     artifacts_root: Path = DEFAULT_ARTIFACT_ROOT
     workers: int = 1
+    annotation_enabled: bool | None = None
+    annotation_detector: str | None = None
+    annotation_segmenter: str | None = None
+    annotation_min_score: float | None = None
     strict_sequence: bool = True
 
 
@@ -28,6 +32,15 @@ def execute(command: RunCommand) -> None:
         input_path=command.input,
         strict_sequence=command.strict_sequence,
     )
+    if command.annotation_enabled is not None:
+        cfg.annotation.enabled = command.annotation_enabled
+    if command.annotation_detector is not None:
+        cfg.annotation.detector = command.annotation_detector
+    if command.annotation_segmenter is not None:
+        cfg.annotation.segmenter = command.annotation_segmenter
+    if command.annotation_min_score is not None:
+        cfg.annotation.min_score = float(command.annotation_min_score)
+
     result = execute_pipeline_job(
         input_path=command.input,
         config=cfg,
