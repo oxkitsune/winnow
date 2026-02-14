@@ -1,0 +1,63 @@
+"""Minimal file-queue scheduler for the local daemon."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+
+from winnow.storage.atomic import atomic_move, read_json
+from winnow.storage.events import append_event
+from winnow.storage.queue import read_job, write_job
+from winnow.storage.state_store import StatePaths
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _next_pending(paths: StatePaths) -> Path | None:
+    candidates = sorted(paths.queue_pending.glob("*.json"))
+    if not candidates:
+        return None
+    return candidates[0]
+
+
+def process_one_pending(paths: StatePaths) -> int:
+    """Process one queued job as a no-op placeholder and mark success."""
+
+    pending_path = _next_pending(paths)
+    if pending_path is None:
+        return 0
+
+    job_id = pending_path.stem
+    running_path = paths.queue_running / pending_path.name
+    done_path = paths.queue_done / pending_path.name
+
+    atomic_move(pending_path, running_path)
+
+    job = read_job(paths, job_id)
+    if job is None:
+        payload = read_json(running_path)
+        job = {
+            "job_id": job_id,
+            "status": "PENDING",
+            "submitted_at": _now(),
+            "updated_at": _now(),
+            "payload": payload,
+        }
+
+    job["status"] = "RUNNING"
+    job["updated_at"] = _now()
+    job["started_at"] = _now()
+    write_job(paths, job_id, job)
+    append_event(paths, {"event": "job_started", "job_id": job_id})
+
+    job["status"] = "SUCCEEDED"
+    job["updated_at"] = _now()
+    job["finished_at"] = _now()
+    job["message"] = "Gateway placeholder execution completed."
+    write_job(paths, job_id, job)
+
+    atomic_move(running_path, done_path)
+    append_event(paths, {"event": "job_finished", "job_id": job_id, "status": "SUCCEEDED"})
+    return 1
