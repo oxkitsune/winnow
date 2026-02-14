@@ -109,3 +109,41 @@ def run(batch: BatchInput, config: IdleMetricConfig) -> list[dict[str, Any]]:
         )
 
     return records
+
+
+def globalize(
+    records: list[dict[str, Any]],
+    config: IdleMetricConfig,
+    stream_id: str,
+) -> list[dict[str, Any]]:
+    """Recompute idle segments globally across all batches of a stream."""
+
+    ordered = sorted((dict(record) for record in records), key=lambda item: int(item["frame_idx"]))
+    if not ordered:
+        return ordered
+
+    frame_indices: list[int] = [int(record["frame_idx"]) for record in ordered]
+    arrays = [_load_grayscale(Path(str(record["frame_path"]))) for record in ordered]
+    raw_motion = _motion_scores(arrays)
+    smoothed_motion = _smooth(raw_motion, config.smoothing_window)
+    segment_ids = _mark_idle_segments(
+        frame_indices=frame_indices,
+        smoothed=smoothed_motion,
+        threshold=config.motion_threshold,
+        min_run=config.min_run,
+    )
+
+    for idx, record in enumerate(ordered):
+        local_segment = segment_ids[idx]
+        global_segment = (
+            f"{stream_id}:{local_segment}" if isinstance(local_segment, str) else None
+        )
+        record["motion_score"] = raw_motion[idx]
+        record["smoothed_motion_score"] = smoothed_motion[idx]
+        record["motion_threshold"] = config.motion_threshold
+        record["is_idle"] = global_segment is not None
+        record["idle_segment_id"] = global_segment
+        record["smoothing_window"] = config.smoothing_window
+        record["min_run"] = config.min_run
+
+    return ordered

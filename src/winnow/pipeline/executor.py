@@ -12,11 +12,13 @@ import traceback
 from typing import Any
 from uuid import uuid4
 
-from winnow.config.schema import PipelineConfig
+from winnow.config.schema import DuplicateMetricConfig, IdleMetricConfig, PipelineConfig
 from winnow.ingest.scanner import StreamScanResult, scan_stream
+from winnow.metrics import duplicates as duplicate_metrics
+from winnow.metrics import idle as idle_metrics
 from winnow.pipeline.registry import resolve_stages
 from winnow.pipeline.stage import BatchInput, FrameInput, StageDefinition
-from winnow.storage.artifacts import store_jsonl_artifact
+from winnow.storage.artifacts import read_jsonl_artifact, store_jsonl_artifact
 from winnow.storage.atomic import atomic_write_json, atomic_write_text
 from winnow.storage.checkpoints import (
     checkpoint_path,
@@ -79,6 +81,17 @@ def _build_cache_key(stage: StageDefinition, batch: BatchInput) -> str:
             }
             for frame in batch.frames
         ],
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
+def _build_global_cache_key(stage: StageDefinition, batch_cache_keys: list[str]) -> str:
+    payload = {
+        "stage": stage.name,
+        "version": stage.version,
+        "config": _to_jsonable(stage.config),
+        "batch_cache_keys": sorted(batch_cache_keys),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return sha256(encoded).hexdigest()
@@ -371,6 +384,198 @@ def _execute_stage(
         raise RuntimeError(f"Stage {stage.name} failed: {first_error}")
 
 
+def _collect_stage_records_for_batches(
+    *,
+    stage: StageDefinition,
+    batches: list[BatchInput],
+    paths: StatePaths,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    records: list[dict[str, Any]] = []
+    cache_keys: list[str] = []
+
+    for batch in batches:
+        cache_key = _build_cache_key(stage, batch)
+        ckpt_path = checkpoint_path(
+            paths=paths,
+            stage_name=stage.name,
+            stream_id=batch.stream_id,
+            batch_start=batch.start_idx,
+            batch_end=batch.end_idx,
+            cache_key=cache_key,
+        )
+        checkpoint = read_checkpoint(ckpt_path)
+        if checkpoint is None or checkpoint.get("status") != "SUCCEEDED":
+            raise RuntimeError(
+                f"Missing successful checkpoint for stage={stage.name} "
+                f"batch={batch.start_idx}-{batch.end_idx}"
+            )
+
+        artifact = checkpoint.get("artifact")
+        uri = artifact.get("uri") if isinstance(artifact, dict) else None
+        if not isinstance(uri, str):
+            raise RuntimeError(
+                f"Checkpoint missing artifact URI for stage={stage.name} "
+                f"batch={batch.start_idx}-{batch.end_idx}"
+            )
+
+        artifact_path = Path(uri)
+        if not artifact_path.exists():
+            raise FileNotFoundError(f"Artifact URI not found: {artifact_path}")
+
+        records.extend(read_jsonl_artifact(artifact_path))
+        cache_keys.append(cache_key)
+
+    records.sort(key=lambda item: int(item.get("frame_idx", 0)))
+    return records, cache_keys
+
+
+def _globalize_stage_records(
+    *,
+    stage: StageDefinition,
+    records: list[dict[str, Any]],
+    stream_id: str,
+) -> list[dict[str, Any]] | None:
+    if stage.name == "duplicates" and isinstance(stage.config, DuplicateMetricConfig):
+        return duplicate_metrics.globalize(records=records, config=stage.config, stream_id=stream_id)
+    if stage.name == "idle" and isinstance(stage.config, IdleMetricConfig):
+        return idle_metrics.globalize(records=records, config=stage.config, stream_id=stream_id)
+    return None
+
+
+def _build_duplicate_cluster_records(
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        group_id = record.get("duplicate_group_id")
+        if not isinstance(group_id, str):
+            continue
+        groups.setdefault(group_id, []).append(record)
+
+    clusters: list[dict[str, Any]] = []
+    for group_id in sorted(groups):
+        members = sorted(groups[group_id], key=lambda item: int(item["frame_idx"]))
+        frame_indices = [int(item["frame_idx"]) for item in members]
+        confidences = [float(item.get("duplicate_confidence", 0.0)) for item in members]
+        clusters.append(
+            {
+                "duplicate_group_id": group_id,
+                "representative_frame_idx": frame_indices[0],
+                "member_count": len(members),
+                "frame_indices": frame_indices,
+                "mean_confidence": sum(confidences) / len(confidences) if confidences else 0.0,
+            }
+        )
+    return clusters
+
+
+def _build_idle_interval_records(
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        segment_id = record.get("idle_segment_id")
+        if not isinstance(segment_id, str):
+            continue
+        groups.setdefault(segment_id, []).append(record)
+
+    intervals: list[dict[str, Any]] = []
+    for segment_id in sorted(groups):
+        members = sorted(groups[segment_id], key=lambda item: int(item["frame_idx"]))
+        frame_indices = [int(item["frame_idx"]) for item in members]
+        smoothed = [float(item.get("smoothed_motion_score", 0.0)) for item in members]
+        intervals.append(
+            {
+                "idle_segment_id": segment_id,
+                "start_frame_idx": frame_indices[0],
+                "end_frame_idx": frame_indices[-1],
+                "frame_count": len(frame_indices),
+                "frame_indices": frame_indices,
+                "mean_smoothed_motion": sum(smoothed) / len(smoothed) if smoothed else 0.0,
+            }
+        )
+    return intervals
+
+
+def _build_stage_summaries(
+    *,
+    stage: StageDefinition,
+    global_records: list[dict[str, Any]],
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    if stage.name == "duplicates":
+        return [("clusters", _build_duplicate_cluster_records(global_records))]
+    if stage.name == "idle":
+        return [("intervals", _build_idle_interval_records(global_records))]
+    return []
+
+
+def _write_global_stage_output(
+    *,
+    stage: StageDefinition,
+    batches: list[BatchInput],
+    paths: StatePaths,
+    artifact_root: Path,
+    stream_id: str,
+) -> dict[str, Any] | None:
+    if not batches:
+        return None
+
+    per_batch_records, cache_keys = _collect_stage_records_for_batches(
+        stage=stage,
+        batches=batches,
+        paths=paths,
+    )
+    global_records = _globalize_stage_records(
+        stage=stage,
+        records=per_batch_records,
+        stream_id=stream_id,
+    )
+    if global_records is None:
+        return None
+
+    global_cache_key = _build_global_cache_key(stage, cache_keys)
+    first_batch = min(batches, key=lambda item: item.start_idx)
+    last_batch = max(batches, key=lambda item: item.end_idx)
+
+    artifact = store_jsonl_artifact(
+        artifact_root,
+        stage_name=f"{stage.name}_global",
+        stream_id=stream_id,
+        batch_start=first_batch.start_idx,
+        batch_end=last_batch.end_idx,
+        cache_key=global_cache_key,
+        records=global_records,
+    )
+    summary_artifacts: dict[str, dict[str, Any]] = {}
+    for summary_name, summary_records in _build_stage_summaries(
+        stage=stage,
+        global_records=global_records,
+    ):
+        summary_artifact = store_jsonl_artifact(
+            artifact_root,
+            stage_name=f"{stage.name}_{summary_name}",
+            stream_id=stream_id,
+            batch_start=first_batch.start_idx,
+            batch_end=last_batch.end_idx,
+            cache_key=global_cache_key,
+            records=summary_records,
+        )
+        summary_artifacts[summary_name] = {
+            "name": summary_name,
+            "record_count": summary_artifact["record_count"],
+            "artifact": summary_artifact,
+        }
+
+    return {
+        "type": "global_stage_output",
+        "stage": stage.name,
+        "cache_key": global_cache_key,
+        "record_count": artifact["record_count"],
+        "artifact": artifact,
+        "summary_artifacts": summary_artifacts,
+    }
+
+
 def execute_pipeline_job(
     *,
     input_path: Path,
@@ -382,7 +587,7 @@ def execute_pipeline_job(
     max_workers: int = 1,
     raise_on_error: bool = True,
 ) -> dict[str, Any]:
-    """Execute blur+darkness pipeline for one stream folder."""
+    """Execute full stream pipeline for one input folder."""
 
     paths = ensure_state_layout(state_root)
     artifact_root = ensure_artifact_root(artifacts_root)
@@ -416,6 +621,7 @@ def execute_pipeline_job(
         stage.name: {"completed": 0, "skipped": 0, "failed": 0}
         for stage in stages
     }
+    stage_outputs: dict[str, Any] = {}
 
     running_record: dict[str, Any] = {
         "job_id": job_id,
@@ -432,6 +638,7 @@ def execute_pipeline_job(
         "max_workers": worker_count,
         "config": asdict(config),
         "stage_stats": stage_stats,
+        "stage_outputs": stage_outputs,
     }
     if existing_job and "payload" in existing_job:
         running_record["payload"] = existing_job["payload"]
@@ -449,6 +656,25 @@ def execute_pipeline_job(
                 max_workers=worker_count,
             )
 
+            global_output = _write_global_stage_output(
+                stage=stage,
+                batches=batches,
+                paths=paths,
+                artifact_root=artifact_root,
+                stream_id=stream_id,
+            )
+            if global_output is not None:
+                stage_outputs[stage.name] = global_output
+                append_event(
+                    paths,
+                    {
+                        "event": "stage_globalized",
+                        "job_id": job_id,
+                        "stage": stage.name,
+                        "record_count": global_output["record_count"],
+                    },
+                )
+
         success_record = {
             **running_record,
             "status": "SUCCEEDED",
@@ -456,6 +682,7 @@ def execute_pipeline_job(
             "finished_at": _now(),
             "message": "Pipeline execution completed.",
             "stage_stats": stage_stats,
+            "stage_outputs": stage_outputs,
         }
         write_job(paths, job_id, success_record)
         append_event(paths, {"event": "pipeline_finished", "job_id": job_id, "status": "SUCCEEDED"})
@@ -470,6 +697,7 @@ def execute_pipeline_job(
             "error": f"{type(exc).__name__}: {exc}",
             "traceback": traceback.format_exc(),
             "stage_stats": stage_stats,
+            "stage_outputs": stage_outputs,
         }
         write_job(paths, job_id, failed_record)
         append_event(paths, {"event": "pipeline_finished", "job_id": job_id, "status": "FAILED"})

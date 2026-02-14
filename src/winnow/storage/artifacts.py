@@ -53,3 +53,19 @@ def store_jsonl_artifact(
     }
     atomic_write_json(meta_path, meta)
     return meta
+
+
+def read_jsonl_artifact(path: Path) -> list[dict[str, Any]]:
+    """Read JSONL artifact records from disk."""
+
+    records: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            text = line.strip()
+            if not text:
+                continue
+            payload = json.loads(text)
+            if not isinstance(payload, dict):
+                raise TypeError(f"Artifact line is not a JSON object: {path}")
+            records.append(payload)
+    return records
