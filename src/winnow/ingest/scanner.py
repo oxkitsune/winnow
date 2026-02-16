@@ -46,6 +46,16 @@ def scan_stream(stream_path: Path, strict_sequence: bool = True) -> StreamScanRe
             continue
         parsed.append(FrameRef(frame_idx=idx, path=child))
 
+    # Support nested dataset layouts by falling back to recursive discovery.
+    if not parsed:
+        for child in stream_path.rglob("*"):
+            if not child.is_file():
+                continue
+            idx = parse_frame_index(child)
+            if idx is None:
+                continue
+            parsed.append(FrameRef(frame_idx=idx, path=child))
+
     parsed.sort(key=lambda item: item.frame_idx)
     indices = [item.frame_idx for item in parsed]
     missing = find_missing_indices(indices)

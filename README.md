@@ -5,6 +5,8 @@ Winnow is an image-stream data preparation toolkit focused on composable, parall
 ## What It Does
 
 - Ingests one stream per folder (`image_0`, `image_1`, ...).
+  - If no matching files are found at the top level, Winnow automatically falls
+    back to recursive discovery under the input directory.
 - Computes frame metrics (`blur`, `darkness`) and stream-aware analytics (`duplicates`, `idle`).
 - Runs optional automatic annotation and exports COCO.
 - Supports direct local runs and queue-based daemon orchestration.
