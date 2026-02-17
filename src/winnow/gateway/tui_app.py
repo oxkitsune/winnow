@@ -582,6 +582,7 @@ class GatewayTextualApp(App[None]):
             job=job,
             stage_names=stage_names,
             read_payload=self._read_json_cached,
+            artifact_cache=self._artifact_metric_cache,
         )
         stage_metric_stats = _build_stage_metric_stats(
             self.paths,

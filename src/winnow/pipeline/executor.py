@@ -882,6 +882,7 @@ def execute_pipeline_job(
         "input": str(input_path.resolve()),
         "stream_id": stream_id,
         "frame_count": len(frames),
+        "active_frame_count": len(active_frames),
         "batch_size": config.batch_size,
         "batch_count": len(batches),
         "max_workers": worker_count,
@@ -970,6 +971,11 @@ def execute_pipeline_job(
                 paths=paths,
                 active_frames=active_frames,
             )
+            running_record["updated_at"] = _now()
+            running_record["stage_stats"] = stage_stats
+            running_record["stage_outputs"] = stage_outputs
+            running_record["active_frame_count"] = len(active_frames)
+            write_job(paths, job_id, running_record)
 
         success_record = {
             **running_record,

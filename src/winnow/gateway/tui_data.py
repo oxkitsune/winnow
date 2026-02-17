@@ -435,26 +435,99 @@ def _stage_output_image_count(
     return total if found else None
 
 
+def _stage_output_survivor_count(
+    paths: StatePaths,
+    *,
+    stage_name: str,
+    stream_id: str,
+    exclude_field: str,
+    read_payload: Callable[[Path], dict[str, Any] | None],
+    artifact_cache: dict[Path, _ArtifactMetricCacheEntry],
+) -> int | None:
+    stage_root = paths.stages / stage_name / stream_id
+    if not stage_root.exists():
+        return None
+
+    try:
+        batch_dirs = sorted(stage_root.iterdir(), key=lambda path: path.name)
+    except OSError:
+        return None
+
+    total = 0
+    found = False
+    seen_artifacts: set[Path] = set()
+    for batch_dir in batch_dirs:
+        if not batch_dir.is_dir():
+            continue
+        latest = _latest_checkpoint_in_batch_dir(batch_dir, read_payload=read_payload)
+        if latest is None:
+            continue
+        status = latest.get("status")
+        if not isinstance(status, str) or status.upper() != "SUCCEEDED":
+            continue
+
+        artifact = latest.get("artifact")
+        uri = artifact.get("uri") if isinstance(artifact, dict) else None
+        if not isinstance(uri, str) or not uri:
+            continue
+        artifact_path = Path(uri)
+        if artifact_path in seen_artifacts:
+            continue
+        seen_artifacts.add(artifact_path)
+
+        artifact_stats = _read_metric_artifact_cached(
+            artifact_path,
+            numeric_fields=(),
+            boolean_fields=(exclude_field,),
+            cache=artifact_cache,
+        )
+        if artifact_stats is None:
+            continue
+
+        record_count = artifact_stats.record_count
+        excluded = artifact_stats.true_counts.get(exclude_field, 0)
+        total += max(0, record_count - excluded)
+        found = True
+
+    return total if found else None
+
+
 def _build_stage_image_stats(
     paths: StatePaths,
     *,
     job: JobSummary,
     stage_names: list[str],
     read_payload: Callable[[Path], dict[str, Any] | None],
+    artifact_cache: dict[Path, _ArtifactMetricCacheEntry],
 ) -> dict[str, StageImageStats]:
     input_images = job.frame_count
     expected_batches = max(0, job.batch_count or 0)
     stats: dict[str, StageImageStats] = {}
+    stage_filter_fields: dict[str, str] = {
+        "blur": "is_blurry",
+        "darkness": "is_dark",
+    }
 
     for stage_name in stage_names:
         output_images: int | None = None
         if job.stream_id:
-            output_images = _stage_output_image_count(
-                paths,
-                stage_name=stage_name,
-                stream_id=job.stream_id,
-                read_payload=read_payload,
-            )
+            exclude_field = stage_filter_fields.get(stage_name)
+            if exclude_field is not None:
+                output_images = _stage_output_survivor_count(
+                    paths,
+                    stage_name=stage_name,
+                    stream_id=job.stream_id,
+                    exclude_field=exclude_field,
+                    read_payload=read_payload,
+                    artifact_cache=artifact_cache,
+                )
+            if output_images is None:
+                output_images = _stage_output_image_count(
+                    paths,
+                    stage_name=stage_name,
+                    stream_id=job.stream_id,
+                    read_payload=read_payload,
+                )
         if output_images is None:
             stage_output = (
                 job.stage_outputs.get(stage_name)
@@ -478,7 +551,10 @@ def _build_stage_image_stats(
                 and failed <= 0
                 and job.status in {"SUCCEEDED", "DONE"}
             ):
-                output_images = input_images
+                if completed > 0:
+                    output_images = input_images
+                elif skipped > 0:
+                    output_images = 0
 
         stats[stage_name] = StageImageStats(
             stage=stage_name,
@@ -880,4 +956,3 @@ def _collect_worker_processes(gateway: dict[str, Any]) -> list[WorkerProcess]:
 
     workers.sort(key=lambda item: (0 if item.role == "gateway" else 1, item.pid))
     return workers
-
