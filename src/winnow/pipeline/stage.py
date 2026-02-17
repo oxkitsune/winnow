@@ -31,8 +31,7 @@ class BatchInput:
 class StageRunner(Protocol):
     """Call signature every stage runner must implement."""
 
-    def __call__(self, batch: BatchInput, config: Any) -> list[dict[str, Any]]:
-        ...
+    def __call__(self, batch: BatchInput, config: Any) -> list[dict[str, Any]]: ...
 
 
 @dataclass(frozen=True, slots=True)

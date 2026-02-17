@@ -27,7 +27,11 @@ from textual.widgets import (
     TabPane,
 )
 
-from winnow.gateway.daemon import start_background, status as gateway_status, stop_background
+from winnow.gateway.daemon import (
+    start_background,
+    status as gateway_status,
+    stop_background,
+)
 from winnow.storage.atomic import read_json
 from winnow.storage.events import iter_event_files
 from winnow.storage.state_store import StatePaths, ensure_state_layout
@@ -95,7 +99,12 @@ def _format_ts_short(iso_ts: str | None) -> str:
 
 
 def _latest_timestamp(job: "JobSummary") -> float:
-    for candidate in (job.updated_at, job.finished_at, job.started_at, job.submitted_at):
+    for candidate in (
+        job.updated_at,
+        job.finished_at,
+        job.started_at,
+        job.submitted_at,
+    ):
         parsed = _parse_iso8601(candidate)
         if parsed is not None:
             return parsed.timestamp()
@@ -103,12 +112,19 @@ def _latest_timestamp(job: "JobSummary") -> float:
 
 
 def _is_active_job(job: "JobSummary") -> bool:
-    return job.status in {"PENDING", "RUNNING"} or job.queue_lane in {"pending", "running"}
+    return job.status in {"PENDING", "RUNNING"} or job.queue_lane in {
+        "pending",
+        "running",
+    }
 
 
 def _iter_json_files(directory: Path) -> list[Path]:
     try:
-        files = [path for path in directory.iterdir() if path.is_file() and path.suffix == ".json"]
+        files = [
+            path
+            for path in directory.iterdir()
+            if path.is_file() and path.suffix == ".json"
+        ]
     except OSError:
         return []
     files.sort()
@@ -264,11 +280,21 @@ def _build_job_summary(
         frame_count=_optional_int(frame_count),
         batch_count=_optional_int(payload.get("batch_count")),
         max_workers=_optional_int(max_workers),
-        submitted_at=payload.get("submitted_at") if isinstance(payload.get("submitted_at"), str) else None,
-        updated_at=payload.get("updated_at") if isinstance(payload.get("updated_at"), str) else None,
-        started_at=payload.get("started_at") if isinstance(payload.get("started_at"), str) else None,
-        finished_at=payload.get("finished_at") if isinstance(payload.get("finished_at"), str) else None,
-        stream_id=payload.get("stream_id") if isinstance(payload.get("stream_id"), str) else None,
+        submitted_at=payload.get("submitted_at")
+        if isinstance(payload.get("submitted_at"), str)
+        else None,
+        updated_at=payload.get("updated_at")
+        if isinstance(payload.get("updated_at"), str)
+        else None,
+        started_at=payload.get("started_at")
+        if isinstance(payload.get("started_at"), str)
+        else None,
+        finished_at=payload.get("finished_at")
+        if isinstance(payload.get("finished_at"), str)
+        else None,
+        stream_id=payload.get("stream_id")
+        if isinstance(payload.get("stream_id"), str)
+        else None,
         stage_stats=stage_stats,
         stage_outputs=stage_outputs,
         config=config,
@@ -309,7 +335,11 @@ def _load_jobs(
         if payload is None:
             continue
 
-        job_id = payload.get("job_id") if isinstance(payload.get("job_id"), str) else job_path.stem
+        job_id = (
+            payload.get("job_id")
+            if isinstance(payload.get("job_id"), str)
+            else job_path.stem
+        )
         lane = queue_lookup.get(job_id, ("none", job_path))[0]
         jobs.append(_build_job_summary(job_id=job_id, payload=payload, queue_lane=lane))
         seen.add(job_id)
@@ -326,7 +356,9 @@ def _load_jobs(
     return jobs
 
 
-def _read_events_file(path: Path, *, sink: deque[dict[str, Any]], job_id: str | None = None) -> None:
+def _read_events_file(
+    path: Path, *, sink: deque[dict[str, Any]], job_id: str | None = None
+) -> None:
     try:
         with path.open("r", encoding="utf-8") as handle:
             for raw_line in handle:
@@ -375,12 +407,18 @@ def _load_recent_events(
     return list(sink)[-limit:]
 
 
-def _stage_order(config: dict[str, Any], stage_stats: dict[str, dict[str, int]]) -> list[str]:
+def _stage_order(
+    config: dict[str, Any], stage_stats: dict[str, dict[str, int]]
+) -> list[str]:
     stages = ["blur", "darkness"]
 
-    duplicate_cfg = config.get("duplicate") if isinstance(config.get("duplicate"), dict) else {}
+    duplicate_cfg = (
+        config.get("duplicate") if isinstance(config.get("duplicate"), dict) else {}
+    )
     idle_cfg = config.get("idle") if isinstance(config.get("idle"), dict) else {}
-    annotation_cfg = config.get("annotation") if isinstance(config.get("annotation"), dict) else {}
+    annotation_cfg = (
+        config.get("annotation") if isinstance(config.get("annotation"), dict) else {}
+    )
 
     if bool(duplicate_cfg.get("enabled", True)):
         stages.append("duplicates")
@@ -573,7 +611,9 @@ def _collect_batch_statuses(
         for batch_dir in batch_dirs:
             if not batch_dir.is_dir():
                 continue
-            latest = _latest_checkpoint_in_batch_dir(batch_dir, read_payload=read_payload)
+            latest = _latest_checkpoint_in_batch_dir(
+                batch_dir, read_payload=read_payload
+            )
             if latest is None:
                 continue
             batch_stage_map.setdefault(batch_dir.name, {})[stage_name] = latest
@@ -604,7 +644,9 @@ def _collect_batch_statuses(
                 if isinstance(raw_status, str) and raw_status:
                     status = raw_status.upper()
                 stamp = payload.get("finished_at") or payload.get("started_at")
-                if isinstance(stamp, str) and (updated_at is None or stamp > updated_at):
+                if isinstance(stamp, str) and (
+                    updated_at is None or stamp > updated_at
+                ):
                     updated_at = stamp
                 if worker_pid is None:
                     worker_pid = _optional_int(payload.get("worker_pid"))
@@ -1027,7 +1069,9 @@ class GatewayTextualApp(App[None]):
         self._json_cache: dict[Path, _JsonCacheEntry] = {}
         self._json_cache_pruned_at = 0.0
         self._event_offsets: dict[Path, int] = {}
-        self._events_buffer: deque[dict[str, Any]] = deque(maxlen=max(512, self.events_limit * 8))
+        self._events_buffer: deque[dict[str, Any]] = deque(
+            maxlen=max(512, self.events_limit * 8)
+        )
         self._events_primed = False
         self._detail_snapshot: JobDetailSnapshot | None = None
         self._detail_job_id: str | None = None
@@ -1085,7 +1129,9 @@ class GatewayTextualApp(App[None]):
     def _configure_tables(self) -> None:
         jobs = self.query_one("#jobs_table", DataTable)
         jobs.cursor_type = "row"
-        jobs.add_columns("S", "Status", "Job", "Lane", "Progress", "Workers", "Upd", "Event", "Input")
+        jobs.add_columns(
+            "S", "Status", "Job", "Lane", "Progress", "Workers", "Upd", "Event", "Input"
+        )
 
         stages = self.query_one("#stages_table", DataTable)
         stages.cursor_type = "row"
@@ -1097,7 +1143,9 @@ class GatewayTextualApp(App[None]):
 
         workers = self.query_one("#workers_table", DataTable)
         workers.cursor_type = "row"
-        workers.add_columns("Role", "PID", "PPID", "%CPU", "RSS", "Elapsed", "State", "Command")
+        workers.add_columns(
+            "Role", "PID", "PPID", "%CPU", "RSS", "Elapsed", "State", "Command"
+        )
 
         detail_events = self.query_one("#detail_events_table", DataTable)
         detail_events.cursor_type = "row"
@@ -1119,7 +1167,11 @@ class GatewayTextualApp(App[None]):
             return None
 
         cached = self._json_cache.get(path)
-        if cached is not None and cached.mtime_ns == stat.st_mtime_ns and cached.size == stat.st_size:
+        if (
+            cached is not None
+            and cached.mtime_ns == stat.st_mtime_ns
+            and cached.size == stat.st_size
+        ):
             return cached.payload
 
         payload = _read_job_payload(path)
@@ -1241,7 +1293,9 @@ class GatewayTextualApp(App[None]):
         return None
 
     def _event_severity(self, event: dict[str, Any]) -> str:
-        value = str(event.get("level") or event.get("severity") or event.get("status") or "INFO").upper()
+        value = str(
+            event.get("level") or event.get("severity") or event.get("status") or "INFO"
+        ).upper()
         if "ERROR" in value or "FAIL" in value:
             return "ERROR"
         if "WARN" in value:
@@ -1262,7 +1316,9 @@ class GatewayTextualApp(App[None]):
             return (0, 0)
         done = 0
         for stats in job.stage_stats.values():
-            done = max(done, _as_int(stats.get("completed")) + _as_int(stats.get("skipped")))
+            done = max(
+                done, _as_int(stats.get("completed")) + _as_int(stats.get("skipped"))
+            )
         return (min(done, expected), expected)
 
     def _apply_filters_and_sort(self, jobs: list[JobSummary]) -> list[JobSummary]:
@@ -1278,7 +1334,10 @@ class GatewayTextualApp(App[None]):
                 continue
             if self.filters.status == "Queued" and job.queue_lane != "pending":
                 continue
-            if self.filters.status == "Completed" and job.status not in {"SUCCEEDED", "DONE"}:
+            if self.filters.status == "Completed" and job.status not in {
+                "SUCCEEDED",
+                "DONE",
+            }:
                 continue
             if self.filters.status == "Failed" and job.status != "FAILED":
                 continue
@@ -1299,8 +1358,15 @@ class GatewayTextualApp(App[None]):
                     continue
 
             if query:
-                match = query in job.job_id.lower() or query in (job.input_path or "").lower()
-                match = match or query in job.queue_lane.lower() or query in job.status.lower()
+                match = (
+                    query in job.job_id.lower()
+                    or query in (job.input_path or "").lower()
+                )
+                match = (
+                    match
+                    or query in job.queue_lane.lower()
+                    or query in job.status.lower()
+                )
                 if not match and last_event is not None:
                     event_text = f"{last_event.get('event', '')} {last_event.get('message', '')}".lower()
                     match = query in event_text
@@ -1352,8 +1418,12 @@ class GatewayTextualApp(App[None]):
         ):
             return
 
-        stage_progress = _build_stage_progress(self.paths, job, read_payload=self._read_json_cached)
-        stage_names = [row.stage for row in stage_progress] or _stage_order(job.config, job.stage_stats)
+        stage_progress = _build_stage_progress(
+            self.paths, job, read_payload=self._read_json_cached
+        )
+        stage_names = [row.stage for row in stage_progress] or _stage_order(
+            job.config, job.stage_stats
+        )
         batches = _collect_batch_statuses(
             self.paths,
             job=job,
@@ -1401,7 +1471,9 @@ class GatewayTextualApp(App[None]):
         try:
             all_jobs = _load_jobs(self.paths, read_payload=self._read_json_cached)
         except Exception as exc:  # pragma: no cover
-            self.notify(f"job refresh failed: {type(exc).__name__}: {exc}", severity="error")
+            self.notify(
+                f"job refresh failed: {type(exc).__name__}: {exc}", severity="error"
+            )
             all_jobs = self.jobs
 
         self._update_event_cache()
@@ -1411,12 +1483,17 @@ class GatewayTextualApp(App[None]):
         previous_selected = self.selected_job_id
         self.filtered_jobs = filtered
         if filtered:
-            if previous_selected and any(job.job_id == previous_selected for job in filtered):
+            if previous_selected and any(
+                job.job_id == previous_selected for job in filtered
+            ):
                 self.selected_job_id = previous_selected
             elif previous_selected:
                 self.selected_job_id = filtered[0].job_id
                 self.ghost_selection = previous_selected
-                self.notify("Selected job no longer in view (filtered/completed)", severity="warning")
+                self.notify(
+                    "Selected job no longer in view (filtered/completed)",
+                    severity="warning",
+                )
             else:
                 self.selected_job_id = filtered[0].job_id
         else:
@@ -1443,12 +1520,18 @@ class GatewayTextualApp(App[None]):
 
     def _update_header(self) -> None:
         header = self.query_one("#header_bar", Static)
-        queue = self.gateway.get("queue") if isinstance(self.gateway.get("queue"), dict) else {}
+        queue = (
+            self.gateway.get("queue")
+            if isinstance(self.gateway.get("queue"), dict)
+            else {}
+        )
         active = _as_int(queue.get("running"))
         queued = _as_int(queue.get("pending"))
         failed = _as_int(queue.get("failed"))
         selected = self._selected_job()
-        refresh_mode = "LIVE (0.8s)" if selected and _is_active_job(selected) else "IDLE (3.0s)"
+        refresh_mode = (
+            "LIVE (0.8s)" if selected and _is_active_job(selected) else "IDLE (3.0s)"
+        )
         age = time.monotonic() - self.last_refresh if self.last_refresh else 0.0
         stale = " STALE" if self._disconnected else ""
         frozen = " FROZEN" if self.freeze_updates else ""
@@ -1462,7 +1545,11 @@ class GatewayTextualApp(App[None]):
         summary = self.query_one("#filters_summary", Static)
         saved = self.query_one("#saved_views", Static)
         focus_mark = ">> " if self.FOCUS_AREAS[self.focus_idx] == "filters" else "   "
-        ghost = f"\nHidden selected job: {self.ghost_selection[:12]}" if self.ghost_selection else ""
+        ghost = (
+            f"\nHidden selected job: {self.ghost_selection[:12]}"
+            if self.ghost_selection
+            else ""
+        )
         summary.update(
             "\n".join(
                 [
@@ -1515,7 +1602,9 @@ class GatewayTextualApp(App[None]):
             latest_event = self._latest_event_for_job(job.job_id)
             if latest_event is not None:
                 ts = _parse_iso8601(latest_event.get("ts"))
-                if ts is not None and ts.timestamp() > self._seen_event_ts_by_job.get(job.job_id, 0.0):
+                if ts is not None and ts.timestamp() > self._seen_event_ts_by_job.get(
+                    job.job_id, 0.0
+                ):
                     new_dot = " *"
             table.add_row(
                 self._status_icon(job.status),
@@ -1531,7 +1620,9 @@ class GatewayTextualApp(App[None]):
             )
 
         if not self.filtered_jobs:
-            table.add_row("-", "(none)", "-", "-", "-", "-", "-", "-", "-", key="__none__")
+            table.add_row(
+                "-", "(none)", "-", "-", "-", "-", "-", "-", "-", key="__none__"
+            )
             table.cursor_coordinate = (0, 0)
             return
 
@@ -1570,7 +1661,9 @@ class GatewayTextualApp(App[None]):
         done, total = self._job_progress(job)
         pct = 0.0 if total <= 0 else (100.0 * done / total)
         last_event = self._latest_event_for_job(job.job_id)
-        last_event_text = "-" if last_event is None else str(last_event.get("event", "event"))
+        last_event_text = (
+            "-" if last_event is None else str(last_event.get("event", "event"))
+        )
         overview.update(
             "\n".join(
                 [
@@ -1587,11 +1680,16 @@ class GatewayTextualApp(App[None]):
 
         stage_rows = sorted(
             snapshot.stage_progress,
-            key=lambda row: (0 if row.running_batches > 0 else 1 if row.failed_batches > 0 else 2, row.stage),
+            key=lambda row: (
+                0 if row.running_batches > 0 else 1 if row.failed_batches > 0 else 2,
+                row.stage,
+            ),
         )
         for row in stage_rows:
             if row.expected_batches > 0:
-                done_count = row.succeeded_batches + row.failed_batches + row.skipped_batches
+                done_count = (
+                    row.succeeded_batches + row.failed_batches + row.skipped_batches
+                )
                 done_text = f"{done_count}/{row.expected_batches}"
             else:
                 done_text = "n/a"
@@ -1618,7 +1716,11 @@ class GatewayTextualApp(App[None]):
         prioritized_batches = sorted(
             snapshot.batches,
             key=lambda batch: (
-                0 if batch.status == "RUNNING" else 1 if batch.status == "FAILED" else 2,
+                0
+                if batch.status == "RUNNING"
+                else 1
+                if batch.status == "FAILED"
+                else 2,
                 batch.start_idx,
             ),
         )
@@ -1646,7 +1748,16 @@ class GatewayTextualApp(App[None]):
                 key=f"worker:{worker.pid}",
             )
         if not snapshot.workers:
-            workers.add_row("-", "-", "-", "-", "-", "-", "-", "No gateway worker processes detected")
+            workers.add_row(
+                "-",
+                "-",
+                "-",
+                "-",
+                "-",
+                "-",
+                "-",
+                "No gateway worker processes detected",
+            )
 
         events_filter.update(
             f"Mode={self.events_mode.upper()} | Follow={'ON' if self.follow_events else 'OFF'} "
@@ -1662,7 +1773,9 @@ class GatewayTextualApp(App[None]):
             if isinstance(event.get("message"), str):
                 details.append(event["message"])
             events.add_row(
-                _format_ts_short(event.get("ts") if isinstance(event.get("ts"), str) else None),
+                _format_ts_short(
+                    event.get("ts") if isinstance(event.get("ts"), str) else None
+                ),
                 severity,
                 str(event.get("job_id", "-"))[:10],
                 str(event.get("event", "event")),
@@ -1671,7 +1784,10 @@ class GatewayTextualApp(App[None]):
             )
 
         files.add_row("job json", str(self.paths.jobs / f"{job.job_id}.json"))
-        files.add_row("queue lane", str((self.paths.root / "queue" / job.queue_lane / f"{job.job_id}.json")))
+        files.add_row(
+            "queue lane",
+            str((self.paths.root / "queue" / job.queue_lane / f"{job.job_id}.json")),
+        )
         files.add_row("state root", str(self.paths.root))
         files.add_row("input", job.input_path or "-")
 
@@ -1702,7 +1818,9 @@ class GatewayTextualApp(App[None]):
             detail = str(event.get("message", ""))
             body = message if not detail else f"{message}: {detail}"
             table.add_row(
-                _format_ts_short(event.get("ts") if isinstance(event.get("ts"), str) else None),
+                _format_ts_short(
+                    event.get("ts") if isinstance(event.get("ts"), str) else None
+                ),
                 severity,
                 str(event.get("job_id", "-"))[:10],
                 _clip(body, 120),
@@ -1727,7 +1845,9 @@ class GatewayTextualApp(App[None]):
         elif area == "detail":
             hint = "Detail: [/] tabs, e job/global events, n/p error nav, Enter open selected detail item"
         else:
-            hint = "Activity: Enter selects job + Events tab, f follow, F freeze updates"
+            hint = (
+                "Activity: Enter selects job + Events tab, f follow, F freeze updates"
+            )
         footer.update(hint)
 
     def _set_focus_area(self, area: str) -> None:
@@ -1793,7 +1913,13 @@ class GatewayTextualApp(App[None]):
         self._refresh(force=True)
 
     def action_cycle_lane_filter(self) -> None:
-        lanes = sorted({job.queue_lane for job in self.jobs if job.queue_lane and job.queue_lane != "none"})
+        lanes = sorted(
+            {
+                job.queue_lane
+                for job in self.jobs
+                if job.queue_lane and job.queue_lane != "none"
+            }
+        )
         choices = ["All"] + lanes
         idx = choices.index(self.filters.lane) if self.filters.lane in choices else 0
         self.filters.lane = choices[(idx + 1) % len(choices)] if choices else "All"
@@ -1831,7 +1957,9 @@ class GatewayTextualApp(App[None]):
     def action_select_next(self) -> None:
         area = self.FOCUS_AREAS[self.focus_idx]
         if area == "filters":
-            self.saved_view_idx = min(len(self.saved_view_names) - 1, self.saved_view_idx + 1)
+            self.saved_view_idx = min(
+                len(self.saved_view_names) - 1, self.saved_view_idx + 1
+            )
             self._update_sidebar()
             return
         if area == "jobs":
@@ -1914,14 +2042,28 @@ class GatewayTextualApp(App[None]):
         self._set_sort(8, reverse=True)
 
     def action_prev_tab(self) -> None:
-        tabs = ["tab-overview", "tab-stages", "tab-batches", "tab-workers", "tab-events", "tab-files"]
+        tabs = [
+            "tab-overview",
+            "tab-stages",
+            "tab-batches",
+            "tab-workers",
+            "tab-events",
+            "tab-files",
+        ]
         detail_tabs = self.query_one("#detail_tabs", TabbedContent)
         current = detail_tabs.active or tabs[0]
         idx = tabs.index(current) if current in tabs else 0
         detail_tabs.active = tabs[(idx - 1) % len(tabs)]
 
     def action_next_tab(self) -> None:
-        tabs = ["tab-overview", "tab-stages", "tab-batches", "tab-workers", "tab-events", "tab-files"]
+        tabs = [
+            "tab-overview",
+            "tab-stages",
+            "tab-batches",
+            "tab-workers",
+            "tab-events",
+            "tab-files",
+        ]
         detail_tabs = self.query_one("#detail_tabs", TabbedContent)
         current = detail_tabs.active or tabs[0]
         idx = tabs.index(current) if current in tabs else 0
@@ -1963,7 +2105,12 @@ class GatewayTextualApp(App[None]):
             self._update_sidebar()
             self.notify(f"Saved view: {name}")
 
-        self.push_screen(PromptScreen(title="Save current filters as a view", placeholder="View name"), _save)
+        self.push_screen(
+            PromptScreen(
+                title="Save current filters as a view", placeholder="View name"
+            ),
+            _save,
+        )
 
     def action_delete_view(self) -> None:
         if not self.saved_view_names:
@@ -1978,11 +2125,16 @@ class GatewayTextualApp(App[None]):
                 return
             self.saved_views.pop(name, None)
             self.saved_view_names = list(self.saved_views)
-            self.saved_view_idx = max(0, min(self.saved_view_idx, len(self.saved_view_names) - 1))
+            self.saved_view_idx = max(
+                0, min(self.saved_view_idx, len(self.saved_view_names) - 1)
+            )
             self._update_sidebar()
             self.notify(f"Deleted view: {name}")
 
-        self.push_screen(ConfirmScreen(message=f"Delete saved view '{name}'?", ok_label="Delete"), _delete)
+        self.push_screen(
+            ConfirmScreen(message=f"Delete saved view '{name}'?", ok_label="Delete"),
+            _delete,
+        )
 
     def action_default_action(self) -> None:
         area = self.FOCUS_AREAS[self.focus_idx]
@@ -2007,8 +2159,12 @@ class GatewayTextualApp(App[None]):
             if row < 0 or row >= len(self._activity_job_ids):
                 return
             job_id = self._activity_job_ids[row].strip()
-            if job_id and any(job.job_id.startswith(job_id) for job in self.filtered_jobs):
-                target = next(job for job in self.filtered_jobs if job.job_id.startswith(job_id))
+            if job_id and any(
+                job.job_id.startswith(job_id) for job in self.filtered_jobs
+            ):
+                target = next(
+                    job for job in self.filtered_jobs if job.job_id.startswith(job_id)
+                )
                 self.selected_job_id = target.job_id
                 self.query_one("#detail_tabs", TabbedContent).active = "tab-events"
                 self._refresh(force=True)
@@ -2050,13 +2206,18 @@ class GatewayTextualApp(App[None]):
                     )
                     self.notify(f"Gateway restarted pid={pid}")
             except Exception as exc:  # pragma: no cover
-                self.notify(f"Gateway action failed: {type(exc).__name__}: {exc}", severity="error")
+                self.notify(
+                    f"Gateway action failed: {type(exc).__name__}: {exc}",
+                    severity="error",
+                )
             self._refresh(force=True)
 
         self.push_screen(GatewayActionScreen(running=running), _apply)
 
     def action_show_help(self) -> None:
-        self.notify("Tab panels | / search | a status | l lane | 1..8 sort | s daemon actions | ? help")
+        self.notify(
+            "Tab panels | / search | a status | l lane | 1..8 sort | s daemon actions | ? help"
+        )
 
     def action_command_palette(self) -> None:
         self.notify("Command palette placeholder: use key hints/footer for now.")

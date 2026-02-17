@@ -11,7 +11,9 @@ from winnow.annotation.schema import Detection
 class Sam2Adapter:
     """Convert bbox detections to simple polygon segmentation."""
 
-    def segment(self, detection: Detection, image_width: int, image_height: int) -> Detection:
+    def segment(
+        self, detection: Detection, image_width: int, image_height: int
+    ) -> Detection:
         x, y, w, h = detection.bbox
         x0 = max(0.0, min(float(image_width), x))
         y0 = max(0.0, min(float(image_height), y))

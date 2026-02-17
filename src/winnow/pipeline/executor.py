@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import time
 import traceback
-from typing import Any
+from typing import Any, Iterable, Iterator
 from uuid import uuid4
 
 from winnow.config.schema import DuplicateMetricConfig, IdleMetricConfig, PipelineConfig
@@ -29,7 +29,7 @@ from winnow.observability.metrics import (
 from winnow.pipeline.registry import resolve_stages
 from winnow.pipeline.stage import BatchInput, FrameInput, StageDefinition
 from winnow.storage.artifacts import (
-    read_jsonl_artifact,
+    iter_jsonl_artifact,
     store_jsonl_artifact,
     verify_jsonl_artifact,
 )
@@ -415,8 +415,13 @@ def _execute_stage(
 
     first_error: Exception | None = None
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        future_map: dict[Future[tuple[int, list[dict[str, Any]]]], tuple[_StageWorkItem, float]] = {
-            executor.submit(_run_stage_runner, stage, work.batch): (work, time.perf_counter())
+        future_map: dict[
+            Future[tuple[int, list[dict[str, Any]]]], tuple[_StageWorkItem, float]
+        ] = {
+            executor.submit(_run_stage_runner, stage, work.batch): (
+                work,
+                time.perf_counter(),
+            )
             for work in prepared
         }
         for future in as_completed(future_map):
@@ -479,16 +484,16 @@ def _execute_stage(
         raise RuntimeError(f"Stage {stage.name} failed: {first_error}")
 
 
-def _collect_stage_records_for_batches(
+def _collect_stage_artifacts_for_batches(
     *,
     stage: StageDefinition,
     batches: list[BatchInput],
     paths: StatePaths,
-) -> tuple[list[dict[str, Any]], list[str]]:
-    records: list[dict[str, Any]] = []
+) -> tuple[list[Path], list[str]]:
+    artifact_paths: list[Path] = []
     cache_keys: list[str] = []
 
-    for batch in batches:
+    for batch in sorted(batches, key=lambda item: item.start_idx):
         cache_key = _build_cache_key(stage, batch)
         ckpt_path = checkpoint_path(
             paths=paths,
@@ -517,32 +522,40 @@ def _collect_stage_records_for_batches(
         if not artifact_path.exists():
             raise FileNotFoundError(f"Artifact URI not found: {artifact_path}")
 
-        records.extend(read_jsonl_artifact(artifact_path))
+        artifact_paths.append(artifact_path)
         cache_keys.append(cache_key)
 
-    records.sort(key=lambda item: int(item.get("frame_idx", 0)))
-    return records, cache_keys
+    return artifact_paths, cache_keys
+
+
+def _iter_stage_records_from_artifacts(
+    artifact_paths: list[Path],
+) -> Iterator[dict[str, Any]]:
+    for artifact_path in artifact_paths:
+        yield from iter_jsonl_artifact(artifact_path)
 
 
 def _globalize_stage_records(
     *,
     stage: StageDefinition,
-    records: list[dict[str, Any]],
+    records: Iterable[dict[str, Any]],
     stream_id: str,
 ) -> list[dict[str, Any]] | None:
     if stage.name == "duplicates" and isinstance(stage.config, DuplicateMetricConfig):
-        return duplicate_metrics.globalize(records=records, config=stage.config, stream_id=stream_id)
+        return duplicate_metrics.globalize(
+            records=records, config=stage.config, stream_id=stream_id
+        )
     if stage.name == "idle" and isinstance(stage.config, IdleMetricConfig):
-        return idle_metrics.globalize(records=records, config=stage.config, stream_id=stream_id)
+        return idle_metrics.globalize(
+            records=records, config=stage.config, stream_id=stream_id
+        )
     if stage.name == "annotation":
-        ordered = [dict(record) for record in records]
-        ordered.sort(key=lambda item: int(item.get("frame_idx", 0)))
-        return ordered
+        return sorted(records, key=lambda item: int(item.get("frame_idx", 0)))
     return None
 
 
 def _build_annotation_summary(
-    records: list[dict[str, Any]],
+    records: Iterable[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     frame_count = 0
     annotation_count = 0
@@ -595,7 +608,9 @@ def _build_duplicate_cluster_records(
                 "representative_frame_idx": frame_indices[0],
                 "member_count": len(members),
                 "frame_indices": frame_indices,
-                "mean_confidence": sum(confidences) / len(confidences) if confidences else 0.0,
+                "mean_confidence": sum(confidences) / len(confidences)
+                if confidences
+                else 0.0,
             }
         )
     return clusters
@@ -623,7 +638,9 @@ def _build_idle_interval_records(
                 "end_frame_idx": frame_indices[-1],
                 "frame_count": len(frame_indices),
                 "frame_indices": frame_indices,
-                "mean_smoothed_motion": sum(smoothed) / len(smoothed) if smoothed else 0.0,
+                "mean_smoothed_motion": sum(smoothed) / len(smoothed)
+                if smoothed
+                else 0.0,
             }
         )
     return intervals
@@ -654,22 +671,60 @@ def _write_global_stage_output(
     if not batches:
         return None
 
-    per_batch_records, cache_keys = _collect_stage_records_for_batches(
+    artifact_paths, cache_keys = _collect_stage_artifacts_for_batches(
         stage=stage,
         batches=batches,
         paths=paths,
     )
-    global_records = _globalize_stage_records(
-        stage=stage,
-        records=per_batch_records,
-        stream_id=stream_id,
-    )
-    if global_records is None:
-        return None
 
     global_cache_key = _build_global_cache_key(stage, cache_keys)
     first_batch = min(batches, key=lambda item: item.start_idx)
     last_batch = max(batches, key=lambda item: item.end_idx)
+
+    if stage.name == "annotation":
+        artifact = store_jsonl_artifact(
+            artifact_root,
+            stage_name=f"{stage.name}_global",
+            stream_id=stream_id,
+            batch_start=first_batch.start_idx,
+            batch_end=last_batch.end_idx,
+            cache_key=global_cache_key,
+            records=_iter_stage_records_from_artifacts(artifact_paths),
+        )
+        summary_records = _build_annotation_summary(
+            _iter_stage_records_from_artifacts(artifact_paths)
+        )
+        summary_artifact = store_jsonl_artifact(
+            artifact_root,
+            stage_name=f"{stage.name}_summary",
+            stream_id=stream_id,
+            batch_start=first_batch.start_idx,
+            batch_end=last_batch.end_idx,
+            cache_key=global_cache_key,
+            records=summary_records,
+        )
+        return {
+            "type": "global_stage_output",
+            "stage": stage.name,
+            "cache_key": global_cache_key,
+            "record_count": artifact["record_count"],
+            "artifact": artifact,
+            "summary_artifacts": {
+                "summary": {
+                    "name": "summary",
+                    "record_count": summary_artifact["record_count"],
+                    "artifact": summary_artifact,
+                }
+            },
+        }
+
+    global_records = _globalize_stage_records(
+        stage=stage,
+        records=_iter_stage_records_from_artifacts(artifact_paths),
+        stream_id=stream_id,
+    )
+    if global_records is None:
+        return None
 
     artifact = store_jsonl_artifact(
         artifact_root,
@@ -752,8 +807,7 @@ def execute_pipeline_job(
     stages = resolve_stages(config)
 
     stage_stats = {
-        stage.name: {"completed": 0, "skipped": 0, "failed": 0}
-        for stage in stages
+        stage.name: {"completed": 0, "skipped": 0, "failed": 0} for stage in stages
     }
     stage_outputs: dict[str, Any] = {}
 

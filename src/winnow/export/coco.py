@@ -50,7 +50,9 @@ def export_job_annotations(job: dict[str, Any], out_dir: Path) -> dict[str, Any]
             {
                 "id": image_id,
                 "frame_idx": frame_idx,
-                "file_name": Path(frame_path).name if frame_path else f"frame_{frame_idx}",
+                "file_name": Path(frame_path).name
+                if frame_path
+                else f"frame_{frame_idx}",
                 "path": frame_path,
                 "width": width,
                 "height": height,
@@ -99,9 +101,7 @@ def export_job_annotations(job: dict[str, Any], out_dir: Path) -> dict[str, Any]
 
             segmentation = payload.get("segmentation")
             if isinstance(segmentation, list) and len(segmentation) >= 6:
-                ann["segmentation"] = [
-                    [float(value) for value in segmentation]
-                ]
+                ann["segmentation"] = [[float(value) for value in segmentation]]
 
             annotations.append(ann)
             annotation_id += 1

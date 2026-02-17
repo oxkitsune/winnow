@@ -15,22 +15,28 @@ from winnow.cli import (
 )
 
 
-TopLevelCommand = Annotated[
-    commands_run.RunCommand,
-    tyro.conf.subcommand(name="run"),
-] | Annotated[
-    commands_submit.SubmitCommand,
-    tyro.conf.subcommand(name="submit"),
-] | Annotated[
-    commands_inspect.InspectCommand,
-    tyro.conf.subcommand(name="inspect"),
-] | Annotated[
-    commands_gateway.GatewayCommand,
-    tyro.conf.subcommand(name="gateway"),
-] | Annotated[
-    commands_export.ExportCommand,
-    tyro.conf.subcommand(name="export"),
-]
+TopLevelCommand = (
+    Annotated[
+        commands_run.RunCommand,
+        tyro.conf.subcommand(name="run"),
+    ]
+    | Annotated[
+        commands_submit.SubmitCommand,
+        tyro.conf.subcommand(name="submit"),
+    ]
+    | Annotated[
+        commands_inspect.InspectCommand,
+        tyro.conf.subcommand(name="inspect"),
+    ]
+    | Annotated[
+        commands_gateway.GatewayCommand,
+        tyro.conf.subcommand(name="gateway"),
+    ]
+    | Annotated[
+        commands_export.ExportCommand,
+        tyro.conf.subcommand(name="export"),
+    ]
+)
 
 
 def dispatch(command: TopLevelCommand) -> None:

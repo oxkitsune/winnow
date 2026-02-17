@@ -9,7 +9,12 @@ from typing import Annotated
 
 import tyro
 
-from winnow.gateway.daemon import GatewayDaemon, start_background, status, stop_background
+from winnow.gateway.daemon import (
+    GatewayDaemon,
+    start_background,
+    status,
+    stop_background,
+)
 from winnow.gateway.service_install import render_launchd_plist, render_systemd_unit
 from winnow.gateway.tui import run_gateway_tui
 from winnow.storage.events import compact_events
@@ -77,7 +82,9 @@ class GatewayMigrateStateCommand:
     """Copy filesystem state from v1 into a v2 target root."""
 
     source_root: Annotated[Path, tyro.conf.arg(prefix_name=False)] = DEFAULT_STATE_ROOT
-    target_root: Annotated[Path, tyro.conf.arg(prefix_name=False)] = DEFAULT_STATE_ROOT_V2
+    target_root: Annotated[Path, tyro.conf.arg(prefix_name=False)] = (
+        DEFAULT_STATE_ROOT_V2
+    )
     force: Annotated[bool, tyro.conf.arg(prefix_name=False)] = False
 
 
@@ -93,31 +100,40 @@ class GatewayTuiCommand:
     events_limit: Annotated[int, tyro.conf.arg(prefix_name=False)] = 200
 
 
-GatewaySubcommand = Annotated[
-    GatewayStartCommand,
-    tyro.conf.subcommand(name="start", prefix_name=False),
-] | Annotated[
-    GatewayStopCommand,
-    tyro.conf.subcommand(name="stop", prefix_name=False),
-] | Annotated[
-    GatewayStatusCommand,
-    tyro.conf.subcommand(name="status", prefix_name=False),
-] | Annotated[
-    GatewayInstallServiceCommand,
-    tyro.conf.subcommand(name="install-service", prefix_name=False),
-] | Annotated[
-    GatewaySnapshotCommand,
-    tyro.conf.subcommand(name="snapshot", prefix_name=False),
-] | Annotated[
-    GatewayCompactEventsCommand,
-    tyro.conf.subcommand(name="compact-events", prefix_name=False),
-] | Annotated[
-    GatewayMigrateStateCommand,
-    tyro.conf.subcommand(name="migrate-state", prefix_name=False),
-] | Annotated[
-    GatewayTuiCommand,
-    tyro.conf.subcommand(name="tui", prefix_name=False),
-]
+GatewaySubcommand = (
+    Annotated[
+        GatewayStartCommand,
+        tyro.conf.subcommand(name="start", prefix_name=False),
+    ]
+    | Annotated[
+        GatewayStopCommand,
+        tyro.conf.subcommand(name="stop", prefix_name=False),
+    ]
+    | Annotated[
+        GatewayStatusCommand,
+        tyro.conf.subcommand(name="status", prefix_name=False),
+    ]
+    | Annotated[
+        GatewayInstallServiceCommand,
+        tyro.conf.subcommand(name="install-service", prefix_name=False),
+    ]
+    | Annotated[
+        GatewaySnapshotCommand,
+        tyro.conf.subcommand(name="snapshot", prefix_name=False),
+    ]
+    | Annotated[
+        GatewayCompactEventsCommand,
+        tyro.conf.subcommand(name="compact-events", prefix_name=False),
+    ]
+    | Annotated[
+        GatewayMigrateStateCommand,
+        tyro.conf.subcommand(name="migrate-state", prefix_name=False),
+    ]
+    | Annotated[
+        GatewayTuiCommand,
+        tyro.conf.subcommand(name="tui", prefix_name=False),
+    ]
+)
 
 
 @dataclass(slots=True)
@@ -138,7 +154,9 @@ def execute(command: GatewayCommand) -> None:
             print(f"gateway already running pid={pid}")
             return
         if sub.foreground:
-            daemon = GatewayDaemon(state_root=sub.state_root, poll_interval=sub.poll_interval)
+            daemon = GatewayDaemon(
+                state_root=sub.state_root, poll_interval=sub.poll_interval
+            )
             daemon.run_forever()
             return
         pid = start_background(

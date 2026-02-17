@@ -198,7 +198,9 @@ def record_stage_result(
         elif normalized == "FAILED":
             stage["failed"] = int(stage.get("failed", 0)) + 1
 
-        stage["total_latency_sec"] = float(stage.get("total_latency_sec", 0.0)) + latency
+        stage["total_latency_sec"] = (
+            float(stage.get("total_latency_sec", 0.0)) + latency
+        )
         stage["last_latency_sec"] = latency
         stage["last_status"] = normalized
         stage["updated_at"] = _now()

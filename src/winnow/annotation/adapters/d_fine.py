@@ -38,7 +38,9 @@ class DFineAdapter:
         coverage = float(np.mean(mask))
         return max(0.0, min(1.0, coverage * 3.0))
 
-    def detect(self, frame_path: Path, min_score: float) -> tuple[int, int, list[Detection]]:
+    def detect(
+        self, frame_path: Path, min_score: float
+    ) -> tuple[int, int, list[Detection]]:
         """Return image size and detections for a frame."""
 
         rgb = self._load_rgb(frame_path)
@@ -52,13 +54,17 @@ class DFineAdapter:
         if bright_bbox is not None:
             score = self._score_from_mask(bright_mask)
             if score >= min_score:
-                detections.append(Detection(label="bright_region", score=score, bbox=bright_bbox))
+                detections.append(
+                    Detection(label="bright_region", score=score, bbox=bright_bbox)
+                )
 
         dark_mask = gray <= self.dark_threshold
         dark_bbox = self._bbox_from_mask(dark_mask)
         if dark_bbox is not None:
             score = self._score_from_mask(dark_mask)
             if score >= min_score:
-                detections.append(Detection(label="dark_region", score=score, bbox=dark_bbox))
+                detections.append(
+                    Detection(label="dark_region", score=score, bbox=dark_bbox)
+                )
 
         return width, height, detections

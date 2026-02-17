@@ -116,7 +116,9 @@ def rebuild_snapshot(
     }
 
 
-def read_snapshot(paths: StatePaths, *, name: str = "state-latest.json") -> dict[str, Any] | None:
+def read_snapshot(
+    paths: StatePaths, *, name: str = "state-latest.json"
+) -> dict[str, Any] | None:
     """Read a named snapshot if present."""
 
     path = paths.snapshots / name

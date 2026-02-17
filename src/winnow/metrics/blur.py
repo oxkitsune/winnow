@@ -19,7 +19,9 @@ def _load_grayscale(path: Path) -> np.ndarray:
 
 def _laplacian_variance(gray: np.ndarray) -> float:
     if gray.ndim != 2:
-        raise ValueError(f"Expected grayscale image with 2 dims, got shape {gray.shape}")
+        raise ValueError(
+            f"Expected grayscale image with 2 dims, got shape {gray.shape}"
+        )
     if gray.shape[0] < 3 or gray.shape[1] < 3:
         return 0.0
 

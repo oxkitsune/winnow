@@ -66,7 +66,9 @@ def iter_event_files(paths: StatePaths) -> Iterator[Path]:
 
     compact_dir = paths.events / "compact"
     if compact_dir.exists():
-        for compact_path in sorted(compact_dir.glob(f"{_COMPACT_PREFIX}*{_JSONL_SUFFIX}")):
+        for compact_path in sorted(
+            compact_dir.glob(f"{_COMPACT_PREFIX}*{_JSONL_SUFFIX}")
+        ):
             yield compact_path
 
     for daily_path in _daily_files(paths):

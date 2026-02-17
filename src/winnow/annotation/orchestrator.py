@@ -36,14 +36,18 @@ def _annotate_frame(
     frame_idx: int,
     min_score: float,
 ) -> FrameAnnotation:
-    width, height, detections = detector.detect(frame_path=frame_path, min_score=min_score)
+    width, height, detections = detector.detect(
+        frame_path=frame_path, min_score=min_score
+    )
 
     final_detections: list[Detection] = []
     for item in detections:
         if segmenter is None:
             final_detections.append(item)
             continue
-        final_detections.append(segmenter.segment(item, image_width=width, image_height=height))
+        final_detections.append(
+            segmenter.segment(item, image_width=width, image_height=height)
+        )
 
     return FrameAnnotation(
         frame_idx=frame_idx,

@@ -50,7 +50,9 @@ def load_object(reference: str) -> Any:
     return _resolve_attr(module, attr)
 
 
-def default_pipeline_config(input_path: Path, strict_sequence: bool = True) -> PipelineConfig:
+def default_pipeline_config(
+    input_path: Path, strict_sequence: bool = True
+) -> PipelineConfig:
     """Build a default pipeline config bound to a specific input path."""
 
     return PipelineConfig(
@@ -69,7 +71,9 @@ def load_pipeline_config(
     """Load a PipelineConfig from reference or create a default."""
 
     if config_ref is None:
-        return default_pipeline_config(input_path=input_path, strict_sequence=strict_sequence)
+        return default_pipeline_config(
+            input_path=input_path, strict_sequence=strict_sequence
+        )
 
     loaded = load_object(config_ref)
     if not isinstance(loaded, PipelineConfig):

@@ -154,7 +154,9 @@ def status(state_root: Path) -> dict[str, object]:
             "updated_at": metrics.get("updated_at"),
         },
         "snapshot": {
-            "generated_at": snapshot.get("generated_at") if isinstance(snapshot, dict) else None,
+            "generated_at": snapshot.get("generated_at")
+            if isinstance(snapshot, dict)
+            else None,
             "events_total": (
                 snapshot.get("events", {}).get("total")
                 if isinstance(snapshot, dict)

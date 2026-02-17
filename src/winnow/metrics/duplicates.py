@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 from PIL import Image
@@ -74,7 +74,10 @@ def run(batch: BatchInput, config: DuplicateMetricConfig) -> list[dict[str, Any]
                 min_distance[i] = distance
             if distance < min_distance[j]:
                 min_distance[j] = distance
-            if distance <= config.phash_hamming_threshold and abs(luma[i] - luma[j]) <= 16.0:
+            if (
+                distance <= config.phash_hamming_threshold
+                and abs(luma[i] - luma[j]) <= 16.0
+            ):
                 dsu.union(i, j)
 
     groups: dict[int, list[int]] = {}
@@ -91,7 +94,9 @@ def run(batch: BatchInput, config: DuplicateMetricConfig) -> list[dict[str, Any]
         duplicate_rank = 0
         if len(group) > 1:
             rep_frame_idx = batch.frames[representative].frame_idx
-            duplicate_group_id = f"{batch.stream_id}:{batch.start_idx}-{batch.end_idx}:{rep_frame_idx}"
+            duplicate_group_id = (
+                f"{batch.stream_id}:{batch.start_idx}-{batch.end_idx}:{rep_frame_idx}"
+            )
             duplicate_rank = sorted(group).index(idx)
 
         confidence = 0.0
@@ -104,7 +109,9 @@ def run(batch: BatchInput, config: DuplicateMetricConfig) -> list[dict[str, Any]
                 "frame_path": str(frame.path),
                 "duplicate_hash": f"{hashes[idx]:016x}",
                 "mean_luma": luma[idx],
-                "nearest_hamming": min_distance[idx] if min_distance[idx] != 64 else None,
+                "nearest_hamming": min_distance[idx]
+                if min_distance[idx] != 64
+                else None,
                 "duplicate_group_id": duplicate_group_id,
                 "duplicate_group_size": len(group),
                 "duplicate_rank": duplicate_rank,
@@ -117,32 +124,47 @@ def run(batch: BatchInput, config: DuplicateMetricConfig) -> list[dict[str, Any]
 
 
 def globalize(
-    records: list[dict[str, Any]],
+    records: Iterable[dict[str, Any]],
     config: DuplicateMetricConfig,
     stream_id: str,
 ) -> list[dict[str, Any]]:
     """Recompute duplicate grouping globally across all stream batches."""
 
-    ordered = sorted(records, key=lambda item: int(item["frame_idx"]))
-    total = len(ordered)
+    entries: list[tuple[int, str, str | None, int | None, float | None]] = []
+    for record in records:
+        frame_idx_raw = record.get("frame_idx")
+        frame_idx = 0
+        if isinstance(frame_idx_raw, (int, float, str)):
+            try:
+                frame_idx = int(frame_idx_raw)
+            except ValueError:
+                frame_idx = 0
+        frame_path = str(record.get("frame_path", ""))
+
+        hash_text = record.get("duplicate_hash")
+        hash_value: int | None = None
+        if isinstance(hash_text, str):
+            try:
+                hash_value = int(hash_text, 16)
+            except ValueError:
+                hash_value = None
+        else:
+            hash_text = None
+
+        mean_luma = record.get("mean_luma")
+        luma_value = float(mean_luma) if isinstance(mean_luma, (int, float)) else None
+        entries.append((frame_idx, frame_path, hash_text, hash_value, luma_value))
+
+    entries.sort(key=lambda item: item[0])
+    total = len(entries)
     if total == 0:
-        return ordered
+        return []
 
     hashes: list[int | None] = []
     luma: list[float | None] = []
-    for record in ordered:
-        value = record.get("duplicate_hash")
-        if not isinstance(value, str):
-            hashes.append(None)
-            mean_luma = record.get("mean_luma")
-            luma.append(float(mean_luma) if isinstance(mean_luma, (int, float)) else None)
-            continue
-        try:
-            hashes.append(int(value, 16))
-        except ValueError:
-            hashes.append(None)
-        mean_luma = record.get("mean_luma")
-        luma.append(float(mean_luma) if isinstance(mean_luma, (int, float)) else None)
+    for _, _, _, hash_value, luma_value in entries:
+        hashes.append(hash_value)
+        luma.append(luma_value)
 
     dsu = _DisjointSet.create(total)
     min_distance = [64] * total
@@ -175,19 +197,27 @@ def globalize(
         root = dsu.find(idx)
         groups.setdefault(root, []).append(idx)
 
-    for idx, record in enumerate(ordered):
+    ordered_records: list[dict[str, Any]] = []
+    for idx, (frame_idx, frame_path, hash_text, _, luma_value) in enumerate(entries):
+        record: dict[str, Any] = {
+            "frame_idx": frame_idx,
+            "frame_path": frame_path,
+            "duplicate_hash": hash_text,
+            "mean_luma": luma_value,
+        }
         if hashes[idx] is None:
             record["duplicate_group_id"] = None
             record["duplicate_group_size"] = 1
             record["duplicate_rank"] = 0
             record["nearest_hamming"] = None
             record["duplicate_confidence"] = 0.0
+            ordered_records.append(record)
             continue
 
         group = groups[dsu.find(idx)]
-        group_sorted = sorted(group, key=lambda pos: int(ordered[pos]["frame_idx"]))
+        group_sorted = sorted(group, key=lambda pos: entries[pos][0])
         representative = group_sorted[0]
-        rep_frame_idx = int(ordered[representative]["frame_idx"])
+        rep_frame_idx = int(entries[representative][0])
 
         if len(group_sorted) > 1:
             record["duplicate_group_id"] = f"{stream_id}:{rep_frame_idx}"
@@ -198,8 +228,11 @@ def globalize(
             record["duplicate_group_size"] = 1
             record["duplicate_rank"] = 0
 
-        record["nearest_hamming"] = min_distance[idx] if min_distance[idx] != 64 else None
+        record["nearest_hamming"] = (
+            min_distance[idx] if min_distance[idx] != 64 else None
+        )
         record["duplicate_confidence"] = max(0.0, 1.0 - (min_distance[idx] / 64.0))
         record["hamming_threshold"] = config.phash_hamming_threshold
+        ordered_records.append(record)
 
-    return ordered
+    return ordered_records

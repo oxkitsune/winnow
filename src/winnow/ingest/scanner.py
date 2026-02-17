@@ -35,7 +35,9 @@ def scan_stream(stream_path: Path, strict_sequence: bool = True) -> StreamScanRe
     if not stream_path.exists():
         raise FileNotFoundError(f"Input stream path does not exist: {stream_path}")
     if not stream_path.is_dir():
-        raise NotADirectoryError(f"Input stream path must be a directory: {stream_path}")
+        raise NotADirectoryError(
+            f"Input stream path must be a directory: {stream_path}"
+        )
 
     parsed: list[FrameRef] = []
     for child in stream_path.iterdir():
@@ -61,6 +63,10 @@ def scan_stream(stream_path: Path, strict_sequence: bool = True) -> StreamScanRe
     missing = find_missing_indices(indices)
 
     if strict_sequence and not parsed:
-        raise ValueError(f"No files matching image_<idx> pattern found in {stream_path}")
+        raise ValueError(
+            f"No files matching image_<idx> pattern found in {stream_path}"
+        )
 
-    return StreamScanResult(stream_path=stream_path, frames=parsed, missing_indices=missing)
+    return StreamScanResult(
+        stream_path=stream_path, frames=parsed, missing_indices=missing
+    )

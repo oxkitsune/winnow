@@ -29,7 +29,9 @@ def execute(command: ExportCommand) -> None:
     job = read_json(job_path)
     fmt = command.format.strip().lower()
     if fmt != "coco":
-        raise ValueError(f"Unsupported export format: {command.format}. Only 'coco' is available.")
+        raise ValueError(
+            f"Unsupported export format: {command.format}. Only 'coco' is available."
+        )
 
     result = export_job_annotations(job=job, out_dir=command.out)
     print(

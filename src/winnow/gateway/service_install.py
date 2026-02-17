@@ -6,7 +6,9 @@ from pathlib import Path
 import sys
 
 
-def render_systemd_unit(service_name: str, cwd: Path, state_root: Path, poll_interval: float) -> str:
+def render_systemd_unit(
+    service_name: str, cwd: Path, state_root: Path, poll_interval: float
+) -> str:
     """Return a systemd unit template string."""
 
     exe = sys.executable
@@ -26,7 +28,9 @@ WantedBy=multi-user.target
 """
 
 
-def render_launchd_plist(label: str, cwd: Path, state_root: Path, poll_interval: float) -> str:
+def render_launchd_plist(
+    label: str, cwd: Path, state_root: Path, poll_interval: float
+) -> str:
     """Return a launchd plist template string."""
 
     exe = sys.executable

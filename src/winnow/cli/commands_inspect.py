@@ -55,22 +55,28 @@ class InspectAnnotationsCommand:
     state_root: Annotated[Path, tyro.conf.arg(prefix_name=False)] = DEFAULT_STATE_ROOT
 
 
-InspectSubcommand = Annotated[
-    InspectJobCommand,
-    tyro.conf.subcommand(name="job", prefix_name=False),
-] | Annotated[
-    InspectStreamCommand,
-    tyro.conf.subcommand(name="stream", prefix_name=False),
-] | Annotated[
-    InspectDuplicatesCommand,
-    tyro.conf.subcommand(name="duplicates", prefix_name=False),
-] | Annotated[
-    InspectIdleCommand,
-    tyro.conf.subcommand(name="idle", prefix_name=False),
-] | Annotated[
-    InspectAnnotationsCommand,
-    tyro.conf.subcommand(name="annotations", prefix_name=False),
-]
+InspectSubcommand = (
+    Annotated[
+        InspectJobCommand,
+        tyro.conf.subcommand(name="job", prefix_name=False),
+    ]
+    | Annotated[
+        InspectStreamCommand,
+        tyro.conf.subcommand(name="stream", prefix_name=False),
+    ]
+    | Annotated[
+        InspectDuplicatesCommand,
+        tyro.conf.subcommand(name="duplicates", prefix_name=False),
+    ]
+    | Annotated[
+        InspectIdleCommand,
+        tyro.conf.subcommand(name="idle", prefix_name=False),
+    ]
+    | Annotated[
+        InspectAnnotationsCommand,
+        tyro.conf.subcommand(name="annotations", prefix_name=False),
+    ]
+)
 
 
 @dataclass(slots=True)
