@@ -11,7 +11,7 @@ from winnow.config.schema import (
 )
 
 
-IMAGE_DIR = "/Users/gijsd/dnt/dnt-data-toolkit/20250816_014029"
+IMAGE_DIR = "/mnt/storage/gijs/data/htwk_beijing/extracted/G4/GP4_Hephaestus_Sydney_2025-08-15-16-54-11_out/temp/GP4_Hephaestus_Sydney_2025-08-15-16-54-11_out/"
 
 PIPELINE = PipelineConfig(
     ingest=IngestConfig(
@@ -21,7 +21,7 @@ PIPELINE = PipelineConfig(
     ),
     blur=BlurMetricConfig(
         method="laplacian_var",
-        threshold=80.0,
+        threshold=400.0,
     ),
     darkness=DarknessMetricConfig(
         percentile=0.1,
