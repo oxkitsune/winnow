@@ -167,6 +167,15 @@ class StageProgress:
 
 
 @dataclass(slots=True)
+class StageImageStats:
+    """Best-effort input/output image counts for one stage."""
+
+    stage: str
+    input_images: int | None
+    output_images: int | None
+
+
+@dataclass(slots=True)
 class BatchStatus:
     """Per-batch status snapshot for one job."""
 
@@ -201,6 +210,7 @@ class JobDetailSnapshot:
 
     job_id: str
     stage_progress: list[StageProgress]
+    stage_image_stats: dict[str, StageImageStats]
     batches: list[BatchStatus]
     workers: list[WorkerProcess]
     events: list[dict[str, Any]]
@@ -587,6 +597,93 @@ def _latest_checkpoint_in_batch_dir(
             latest_payload = payload
             latest_key = key
     return latest_payload
+
+
+def _stage_output_image_count(
+    paths: StatePaths,
+    *,
+    stage_name: str,
+    stream_id: str,
+    read_payload: Callable[[Path], dict[str, Any] | None],
+) -> int | None:
+    stage_root = paths.stages / stage_name / stream_id
+    if not stage_root.exists():
+        return None
+
+    try:
+        batch_dirs = sorted(stage_root.iterdir(), key=lambda path: path.name)
+    except OSError:
+        return None
+
+    total = 0
+    found = False
+    for batch_dir in batch_dirs:
+        if not batch_dir.is_dir():
+            continue
+        latest = _latest_checkpoint_in_batch_dir(batch_dir, read_payload=read_payload)
+        if latest is None:
+            continue
+        status = latest.get("status")
+        if not isinstance(status, str) or status.upper() != "SUCCEEDED":
+            continue
+        total += max(0, _as_int(latest.get("record_count")))
+        found = True
+
+    return total if found else None
+
+
+def _build_stage_image_stats(
+    paths: StatePaths,
+    *,
+    job: JobSummary,
+    stage_names: list[str],
+    read_payload: Callable[[Path], dict[str, Any] | None],
+) -> dict[str, StageImageStats]:
+    input_images = job.frame_count
+    expected_batches = max(0, job.batch_count or 0)
+    stats: dict[str, StageImageStats] = {}
+
+    for stage_name in stage_names:
+        output_images: int | None = None
+        if job.stream_id:
+            output_images = _stage_output_image_count(
+                paths,
+                stage_name=stage_name,
+                stream_id=job.stream_id,
+                read_payload=read_payload,
+            )
+        if output_images is None:
+            stage_output = (
+                job.stage_outputs.get(stage_name)
+                if isinstance(job.stage_outputs.get(stage_name), dict)
+                else {}
+            )
+            output_images = _optional_int(stage_output.get("record_count"))
+
+        if output_images is None:
+            stage_stat = job.stage_stats.get(stage_name, {})
+            completed = _as_int(stage_stat.get("completed"))
+            skipped = _as_int(stage_stat.get("skipped"))
+            failed = _as_int(stage_stat.get("failed"))
+            stage_complete = (
+                expected_batches == 0
+                or (completed + skipped + failed) >= expected_batches
+            )
+            if (
+                input_images is not None
+                and stage_complete
+                and failed <= 0
+                and job.status in {"SUCCEEDED", "DONE"}
+            ):
+                output_images = input_images
+
+        stats[stage_name] = StageImageStats(
+            stage=stage_name,
+            input_images=input_images,
+            output_images=output_images,
+        )
+
+    return stats
 
 
 def _collect_batch_statuses(
@@ -1135,7 +1232,9 @@ class GatewayTextualApp(App[None]):
 
         stages = self.query_one("#stages_table", DataTable)
         stages.cursor_type = "row"
-        stages.add_columns("Stage", "Done", "OK", "Run", "Fail", "Skip", "Status")
+        stages.add_columns(
+            "Stage", "Done", "OK", "Run", "Fail", "Skip", "In Img", "Out Img", "Status"
+        )
 
         batches = self.query_one("#batches_table", DataTable)
         batches.cursor_type = "row"
@@ -1424,6 +1523,12 @@ class GatewayTextualApp(App[None]):
         stage_names = [row.stage for row in stage_progress] or _stage_order(
             job.config, job.stage_stats
         )
+        stage_image_stats = _build_stage_image_stats(
+            self.paths,
+            job=job,
+            stage_names=stage_names,
+            read_payload=self._read_json_cached,
+        )
         batches = _collect_batch_statuses(
             self.paths,
             job=job,
@@ -1437,6 +1542,7 @@ class GatewayTextualApp(App[None]):
         self._detail_snapshot = JobDetailSnapshot(
             job_id=job.job_id,
             stage_progress=stage_progress,
+            stage_image_stats=stage_image_stats,
             batches=batches,
             workers=workers,
             events=events,
@@ -1664,6 +1770,14 @@ class GatewayTextualApp(App[None]):
         last_event_text = (
             "-" if last_event is None else str(last_event.get("event", "event"))
         )
+        stage_image_parts: list[str] = []
+        for stage_name in [row.stage for row in snapshot.stage_progress]:
+            stage_io = snapshot.stage_image_stats.get(stage_name)
+            if stage_io is None or stage_io.output_images is None:
+                continue
+            stage_image_parts.append(f"{stage_name}={stage_io.output_images}")
+        stage_image_summary = ", ".join(stage_image_parts) if stage_image_parts else "-"
+        input_images = str(job.frame_count) if job.frame_count is not None else "-"
         overview.update(
             "\n".join(
                 [
@@ -1671,6 +1785,7 @@ class GatewayTextualApp(App[None]):
                     f"Status: {job.status} lane={job.queue_lane} mode={job.mode}",
                     f"Input: {_clip(job.input_path or '-', 120)}",
                     f"Progress: {done}/{total} ({pct:.1f}%)",
+                    f"Images: input={input_images} | stage outputs: {stage_image_summary}",
                     f"Timestamps: submitted={job.submitted_at or '-'} started={job.started_at or '-'} "
                     f"updated={job.updated_at or '-'} finished={job.finished_at or '-'}",
                     f"Last activity: {last_event_text}",
@@ -1678,13 +1793,7 @@ class GatewayTextualApp(App[None]):
             )
         )
 
-        stage_rows = sorted(
-            snapshot.stage_progress,
-            key=lambda row: (
-                0 if row.running_batches > 0 else 1 if row.failed_batches > 0 else 2,
-                row.stage,
-            ),
-        )
+        stage_rows = snapshot.stage_progress
         for row in stage_rows:
             if row.expected_batches > 0:
                 done_count = (
@@ -1702,6 +1811,17 @@ class GatewayTextualApp(App[None]):
                 row.succeeded_batches + row.skipped_batches >= row.expected_batches
             ):
                 status = "SUCCEEDED"
+            stage_io = snapshot.stage_image_stats.get(row.stage)
+            input_images_text = (
+                str(stage_io.input_images)
+                if stage_io is not None and stage_io.input_images is not None
+                else "-"
+            )
+            output_images_text = (
+                str(stage_io.output_images)
+                if stage_io is not None and stage_io.output_images is not None
+                else "-"
+            )
             stages.add_row(
                 row.stage,
                 done_text,
@@ -1709,6 +1829,8 @@ class GatewayTextualApp(App[None]):
                 str(row.running_batches),
                 str(row.failed_batches),
                 str(row.skipped_batches),
+                input_images_text,
+                output_images_text,
                 status,
                 key=f"stage:{row.stage}",
             )
