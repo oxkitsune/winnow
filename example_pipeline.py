@@ -21,7 +21,7 @@ PIPELINE = PipelineConfig(
     ),
     blur=BlurMetricConfig(
         method="laplacian_var",
-        threshold=400.0,
+        threshold=80.0,
     ),
     darkness=DarknessMetricConfig(
         percentile=0.1,
