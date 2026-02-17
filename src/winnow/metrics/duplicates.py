@@ -123,7 +123,7 @@ def globalize(
 ) -> list[dict[str, Any]]:
     """Recompute duplicate grouping globally across all stream batches."""
 
-    ordered = sorted((dict(record) for record in records), key=lambda item: int(item["frame_idx"]))
+    ordered = sorted(records, key=lambda item: int(item["frame_idx"]))
     total = len(ordered)
     if total == 0:
         return ordered

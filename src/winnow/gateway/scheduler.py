@@ -14,6 +14,7 @@ from winnow.storage.atomic import atomic_move, atomic_write_json, read_json
 from winnow.storage.events import append_event
 from winnow.storage.queue import read_job, write_job
 from winnow.storage.state_store import DEFAULT_ARTIFACT_ROOT, StatePaths
+from winnow.workers.pool import normalize_worker_count
 
 
 _LOGGER = get_logger("winnow.scheduler")
@@ -82,7 +83,7 @@ def process_one_pending(paths: StatePaths) -> int:
         input_path = Path(payload["input"])
         cfg = pipeline_config_from_dict(payload["config"])
         artifacts_root = Path(payload.get("artifacts_root", str(DEFAULT_ARTIFACT_ROOT)))
-        workers = int(payload.get("workers", 1))
+        workers = normalize_worker_count(payload.get("workers", 8))
 
         result = execute_pipeline_job(
             input_path=input_path,

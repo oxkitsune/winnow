@@ -31,6 +31,19 @@ def _motion_scores(frames: list[np.ndarray]) -> list[float]:
     return scores
 
 
+def _motion_scores_from_paths(frame_paths: list[Path]) -> list[float]:
+    if not frame_paths:
+        return []
+    scores = [0.0]
+    previous = _load_grayscale(frame_paths[0])
+    for path in frame_paths[1:]:
+        current = _load_grayscale(path)
+        diff = np.abs(current - previous)
+        scores.append(float(np.mean(diff)))
+        previous = current
+    return scores
+
+
 def _smooth(scores: list[float], window: int) -> list[float]:
     window = max(1, window)
     out: list[float] = []
@@ -80,8 +93,8 @@ def run(batch: BatchInput, config: IdleMetricConfig) -> list[dict[str, Any]]:
     if not batch.frames:
         return []
 
-    arrays = [_load_grayscale(frame.path) for frame in batch.frames]
-    raw_motion = _motion_scores(arrays)
+    frame_paths = [frame.path for frame in batch.frames]
+    raw_motion = _motion_scores_from_paths(frame_paths)
     smoothed_motion = _smooth(raw_motion, config.smoothing_window)
     frame_indices = [frame.frame_idx for frame in batch.frames]
     segment_ids = _mark_idle_segments(
@@ -118,13 +131,13 @@ def globalize(
 ) -> list[dict[str, Any]]:
     """Recompute idle segments globally across all batches of a stream."""
 
-    ordered = sorted((dict(record) for record in records), key=lambda item: int(item["frame_idx"]))
+    ordered = sorted(records, key=lambda item: int(item["frame_idx"]))
     if not ordered:
         return ordered
 
     frame_indices: list[int] = [int(record["frame_idx"]) for record in ordered]
-    arrays = [_load_grayscale(Path(str(record["frame_path"]))) for record in ordered]
-    raw_motion = _motion_scores(arrays)
+    frame_paths = [Path(str(record["frame_path"])) for record in ordered]
+    raw_motion = _motion_scores_from_paths(frame_paths)
     smoothed_motion = _smooth(raw_motion, config.smoothing_window)
     segment_ids = _mark_idle_segments(
         frame_indices=frame_indices,
