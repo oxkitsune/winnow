@@ -45,13 +45,21 @@ uv run winnow gateway stop
 Gateway Textual TUI controls:
 
 - `q`: quit
-- `Enter`: open selected job detail screen
-- `Esc` or `Backspace`: return to job list
-- `s`: start/stop gateway daemon
-- `a`: toggle active jobs vs all jobs
-- `e`: toggle events scoped to selected job vs all jobs
+- `Tab` / `Shift+Tab`: move focus between filters, jobs, details, activity
+- `Enter`: default action in the focused panel
+- `s`: open daemon actions (start/stop/restart)
+- `a`: cycle status filter (Active/All/Failed/Completed/Queued)
+- `l`: cycle lane filter
+- `e`: toggle Events scope (selected job/global)
 - `r`: refresh immediately
-- `j`/`k` or arrow keys: change selected job
+- `j`/`k` or arrow keys: move selection in focused table/list
+- `[` / `]`: previous/next detail tab
+- `1..8` and `Shift+1..8`: sort jobs table by column (asc/desc)
+- `/`: focus search input
+- `f`: toggle follow mode for events/activity
+- `F`: freeze/resume live updates
+- `Ctrl+S`: save current filters as a named view
+- `d`: delete selected saved view
 
 Inspection and export:
 

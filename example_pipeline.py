@@ -17,7 +17,7 @@ PIPELINE = PipelineConfig(
     ingest=IngestConfig(
         root=IMAGE_DIR,
         glob="*",
-        strict_sequence=True,
+        strict_sequence=False,
     ),
     blur=BlurMetricConfig(
         method="laplacian_var",
