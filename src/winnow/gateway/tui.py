@@ -32,6 +32,7 @@ from winnow.gateway.daemon import (
     status as gateway_status,
     stop_background,
 )
+from winnow.storage.artifacts import iter_jsonl_artifact
 from winnow.storage.atomic import read_json
 from winnow.storage.events import iter_event_files
 from winnow.storage.state_store import StatePaths, ensure_state_layout
@@ -98,6 +99,12 @@ def _format_ts_short(iso_ts: str | None) -> str:
     return stamp.astimezone().strftime("%H:%M:%S")
 
 
+def _format_rss_mib(rss_kib: int | None) -> str:
+    if rss_kib is None:
+        return "-"
+    return f"{rss_kib / 1024.0:.1f}"
+
+
 def _latest_timestamp(job: "JobSummary") -> float:
     for candidate in (
         job.updated_at,
@@ -129,6 +136,25 @@ def _iter_json_files(directory: Path) -> list[Path]:
         return []
     files.sort()
     return files
+
+
+_STAGE_NUMERIC_METRICS: dict[str, tuple[str, ...]] = {
+    "blur": ("blur_score",),
+    "darkness": ("mean_luma", "percentile_luma"),
+}
+
+_STAGE_BOOLEAN_METRICS: dict[str, tuple[str, ...]] = {
+    "blur": ("is_blurry",),
+    "darkness": ("is_dark",),
+}
+
+_METRIC_LABELS: dict[str, str] = {
+    "blur_score": "mean blur score",
+    "mean_luma": "mean darkness (luma)",
+    "percentile_luma": "mean percentile luma",
+    "is_blurry": "blurry",
+    "is_dark": "dark",
+}
 
 
 @dataclass(slots=True)
@@ -176,6 +202,16 @@ class StageImageStats:
 
 
 @dataclass(slots=True)
+class StageMetricStats:
+    """Best-effort aggregate metric stats for one stage."""
+
+    stage: str
+    record_count: int
+    mean_values: dict[str, float]
+    true_ratios: dict[str, float]
+
+
+@dataclass(slots=True)
 class BatchStatus:
     """Per-batch status snapshot for one job."""
 
@@ -211,6 +247,7 @@ class JobDetailSnapshot:
     job_id: str
     stage_progress: list[StageProgress]
     stage_image_stats: dict[str, StageImageStats]
+    stage_metric_stats: dict[str, StageMetricStats]
     batches: list[BatchStatus]
     workers: list[WorkerProcess]
     events: list[dict[str, Any]]
@@ -222,6 +259,19 @@ class _JsonCacheEntry:
     mtime_ns: int
     size: int
     payload: dict[str, Any] | None
+
+
+@dataclass(slots=True)
+class _ArtifactMetricCacheEntry:
+    mtime_ns: int
+    size: int
+    numeric_fields: tuple[str, ...]
+    boolean_fields: tuple[str, ...]
+    record_count: int
+    numeric_sums: dict[str, float]
+    numeric_counts: dict[str, int]
+    true_counts: dict[str, int]
+    boolean_counts: dict[str, int]
 
 
 def _build_job_summary(
@@ -684,6 +734,191 @@ def _build_stage_image_stats(
         )
 
     return stats
+
+
+def _read_metric_artifact_cached(
+    artifact_path: Path,
+    *,
+    numeric_fields: tuple[str, ...],
+    boolean_fields: tuple[str, ...],
+    cache: dict[Path, _ArtifactMetricCacheEntry],
+) -> _ArtifactMetricCacheEntry | None:
+    try:
+        stat = artifact_path.stat()
+    except OSError:
+        cache.pop(artifact_path, None)
+        return None
+
+    cached = cache.get(artifact_path)
+    if (
+        cached is not None
+        and cached.mtime_ns == stat.st_mtime_ns
+        and cached.size == stat.st_size
+        and cached.numeric_fields == numeric_fields
+        and cached.boolean_fields == boolean_fields
+    ):
+        return cached
+
+    numeric_sums = {field: 0.0 for field in numeric_fields}
+    numeric_counts = {field: 0 for field in numeric_fields}
+    true_counts = {field: 0 for field in boolean_fields}
+    boolean_counts = {field: 0 for field in boolean_fields}
+    record_count = 0
+
+    try:
+        for record in iter_jsonl_artifact(artifact_path):
+            record_count += 1
+            for field in numeric_fields:
+                value = record.get(field)
+                if isinstance(value, bool):
+                    continue
+                if isinstance(value, (int, float)):
+                    numeric_sums[field] += float(value)
+                    numeric_counts[field] += 1
+            for field in boolean_fields:
+                value = record.get(field)
+                if isinstance(value, bool):
+                    boolean_counts[field] += 1
+                    if value:
+                        true_counts[field] += 1
+                    continue
+                if isinstance(value, (int, float)):
+                    boolean_counts[field] += 1
+                    if bool(value):
+                        true_counts[field] += 1
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+    entry = _ArtifactMetricCacheEntry(
+        mtime_ns=stat.st_mtime_ns,
+        size=stat.st_size,
+        numeric_fields=numeric_fields,
+        boolean_fields=boolean_fields,
+        record_count=record_count,
+        numeric_sums=numeric_sums,
+        numeric_counts=numeric_counts,
+        true_counts=true_counts,
+        boolean_counts=boolean_counts,
+    )
+    cache[artifact_path] = entry
+    return entry
+
+
+def _build_stage_metric_stats(
+    paths: StatePaths,
+    *,
+    job: JobSummary,
+    stage_names: list[str],
+    read_payload: Callable[[Path], dict[str, Any] | None],
+    artifact_cache: dict[Path, _ArtifactMetricCacheEntry],
+) -> dict[str, StageMetricStats]:
+    if not job.stream_id:
+        return {}
+
+    stats: dict[str, StageMetricStats] = {}
+
+    for stage_name in stage_names:
+        numeric_fields = _STAGE_NUMERIC_METRICS.get(stage_name, ())
+        boolean_fields = _STAGE_BOOLEAN_METRICS.get(stage_name, ())
+        if not numeric_fields and not boolean_fields:
+            continue
+
+        stage_root = paths.stages / stage_name / job.stream_id
+        if not stage_root.exists():
+            continue
+
+        try:
+            batch_dirs = sorted(stage_root.iterdir(), key=lambda path: path.name)
+        except OSError:
+            continue
+
+        stage_record_count = 0
+        numeric_sums = {field: 0.0 for field in numeric_fields}
+        numeric_counts = {field: 0 for field in numeric_fields}
+        true_counts = {field: 0 for field in boolean_fields}
+        boolean_counts = {field: 0 for field in boolean_fields}
+        seen_artifacts: set[Path] = set()
+
+        for batch_dir in batch_dirs:
+            if not batch_dir.is_dir():
+                continue
+
+            latest = _latest_checkpoint_in_batch_dir(
+                batch_dir, read_payload=read_payload
+            )
+            if latest is None:
+                continue
+            status = latest.get("status")
+            if not isinstance(status, str) or status.upper() != "SUCCEEDED":
+                continue
+
+            artifact = latest.get("artifact")
+            uri = artifact.get("uri") if isinstance(artifact, dict) else None
+            if not isinstance(uri, str) or not uri:
+                continue
+
+            artifact_path = Path(uri)
+            if artifact_path in seen_artifacts:
+                continue
+            seen_artifacts.add(artifact_path)
+
+            artifact_stats = _read_metric_artifact_cached(
+                artifact_path,
+                numeric_fields=numeric_fields,
+                boolean_fields=boolean_fields,
+                cache=artifact_cache,
+            )
+            if artifact_stats is None:
+                continue
+
+            stage_record_count += artifact_stats.record_count
+            for field in numeric_fields:
+                numeric_sums[field] += artifact_stats.numeric_sums.get(field, 0.0)
+                numeric_counts[field] += artifact_stats.numeric_counts.get(field, 0)
+            for field in boolean_fields:
+                true_counts[field] += artifact_stats.true_counts.get(field, 0)
+                boolean_counts[field] += artifact_stats.boolean_counts.get(field, 0)
+
+        mean_values = {
+            field: (numeric_sums[field] / count)
+            for field, count in numeric_counts.items()
+            if count > 0
+        }
+        true_ratios = {
+            field: (true_counts[field] / count)
+            for field, count in boolean_counts.items()
+            if count > 0
+        }
+
+        if stage_record_count <= 0 and not mean_values and not true_ratios:
+            continue
+
+        stats[stage_name] = StageMetricStats(
+            stage=stage_name,
+            record_count=stage_record_count,
+            mean_values=mean_values,
+            true_ratios=true_ratios,
+        )
+
+    return stats
+
+
+def _format_stage_metric_line(stage: str, stats: StageMetricStats) -> str:
+    parts: list[str] = []
+    for field in _STAGE_NUMERIC_METRICS.get(stage, ()):
+        value = stats.mean_values.get(field)
+        if value is None:
+            continue
+        label = _METRIC_LABELS.get(field, field)
+        parts.append(f"{label}={value:.2f}")
+    for field in _STAGE_BOOLEAN_METRICS.get(stage, ()):
+        ratio = stats.true_ratios.get(field)
+        if ratio is None:
+            continue
+        label = _METRIC_LABELS.get(field, field)
+        parts.append(f"{label}={ratio * 100.0:.1f}%")
+    parts.append(f"n={stats.record_count}")
+    return f"  {stage}: {', '.join(parts)}"
 
 
 def _collect_batch_statuses(
@@ -1196,6 +1431,7 @@ class GatewayTextualApp(App[None]):
         self._event_error_idx = -1
 
         self._json_cache: dict[Path, _JsonCacheEntry] = {}
+        self._artifact_metric_cache: dict[Path, _ArtifactMetricCacheEntry] = {}
         self._json_cache_pruned_at = 0.0
         self._event_offsets: dict[Path, int] = {}
         self._events_buffer: deque[dict[str, Any]] = deque(
@@ -1275,7 +1511,7 @@ class GatewayTextualApp(App[None]):
         workers = self.query_one("#workers_table", DataTable)
         workers.cursor_type = "row"
         workers.add_columns(
-            "Role", "PID", "PPID", "%CPU", "RSS", "Elapsed", "State", "Command"
+            "Role", "PID", "PPID", "%CPU", "RSS (MiB)", "Elapsed", "State", "Command"
         )
 
         detail_events = self.query_one("#detail_events_table", DataTable)
@@ -1561,6 +1797,13 @@ class GatewayTextualApp(App[None]):
             stage_names=stage_names,
             read_payload=self._read_json_cached,
         )
+        stage_metric_stats = _build_stage_metric_stats(
+            self.paths,
+            job=job,
+            stage_names=stage_names,
+            read_payload=self._read_json_cached,
+            artifact_cache=self._artifact_metric_cache,
+        )
         batches = _collect_batch_statuses(
             self.paths,
             job=job,
@@ -1575,6 +1818,7 @@ class GatewayTextualApp(App[None]):
             job_id=job.job_id,
             stage_progress=stage_progress,
             stage_image_stats=stage_image_stats,
+            stage_metric_stats=stage_metric_stats,
             batches=batches,
             workers=workers,
             events=events,
@@ -1809,6 +2053,14 @@ class GatewayTextualApp(App[None]):
                 continue
             stage_image_parts.append(f"{stage_name}={stage_io.output_images}")
         stage_image_summary = ", ".join(stage_image_parts) if stage_image_parts else "-"
+        metric_lines = ["Metrics: -"]
+        if snapshot.stage_metric_stats:
+            metric_lines = ["Metrics:"]
+            for stage_name in [row.stage for row in snapshot.stage_progress]:
+                stage_stats = snapshot.stage_metric_stats.get(stage_name)
+                if stage_stats is None:
+                    continue
+                metric_lines.append(_format_stage_metric_line(stage_name, stage_stats))
         input_images = str(job.frame_count) if job.frame_count is not None else "-"
         overview.update(
             "\n".join(
@@ -1818,6 +2070,7 @@ class GatewayTextualApp(App[None]):
                     f"Input: {_clip(job.input_path or '-', 120)}",
                     f"Progress: {done}/{total} ({pct:.1f}%)",
                     f"Images: input={input_images} | stage outputs: {stage_image_summary}",
+                    *metric_lines,
                     f"Timestamps: submitted={job.submitted_at or '-'} started={job.started_at or '-'} "
                     f"updated={job.updated_at or '-'} finished={job.finished_at or '-'}",
                     f"Last activity: {last_event_text}",
@@ -1895,7 +2148,7 @@ class GatewayTextualApp(App[None]):
                 str(worker.pid),
                 str(worker.ppid) if worker.ppid is not None else "-",
                 worker.cpu_percent,
-                str(worker.rss_kib) if worker.rss_kib is not None else "-",
+                _format_rss_mib(worker.rss_kib),
                 worker.elapsed,
                 worker.state,
                 _clip(worker.command, 96),
