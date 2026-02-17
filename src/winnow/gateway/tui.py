@@ -822,24 +822,56 @@ def _probe_process(pid: int, *, role: str) -> WorkerProcess | None:
     )
 
 
-def _child_pids(ppid: int) -> list[int]:
+def _process_tree() -> dict[int, list[int]]:
     try:
         proc = subprocess.run(
-            ["pgrep", "-P", str(ppid)],
+            ["ps", "-axo", "pid=,ppid="],
             capture_output=True,
             text=True,
             check=False,
         )
     except OSError:
-        return []
-    if proc.returncode not in (0, 1):
-        return []
-    children: list[int] = []
+        return {}
+    if proc.returncode != 0:
+        return {}
+
+    tree: dict[int, list[int]] = {}
     for raw in proc.stdout.splitlines():
-        candidate = _optional_int(raw.strip())
-        if candidate is not None:
-            children.append(candidate)
-    return sorted(set(children))
+        line = raw.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) < 2:
+            continue
+        pid = _optional_int(parts[0])
+        ppid = _optional_int(parts[1])
+        if pid is None or ppid is None:
+            continue
+        tree.setdefault(ppid, []).append(pid)
+
+    for children in tree.values():
+        children.sort()
+    return tree
+
+
+def _descendant_pids(ppid: int) -> list[int]:
+    tree = _process_tree()
+    if not tree:
+        return []
+
+    descendants: list[int] = []
+    queue = list(tree.get(ppid, []))
+    seen: set[int] = set()
+    while queue:
+        pid = queue.pop(0)
+        if pid in seen:
+            continue
+        seen.add(pid)
+        descendants.append(pid)
+        queue.extend(tree.get(pid, []))
+
+    descendants.sort()
+    return descendants
 
 
 def _collect_worker_processes(gateway: dict[str, Any]) -> list[WorkerProcess]:
@@ -853,7 +885,7 @@ def _collect_worker_processes(gateway: dict[str, Any]) -> list[WorkerProcess]:
     if gateway_proc is not None:
         workers.append(gateway_proc)
 
-    for child_pid in _child_pids(pid):
+    for child_pid in _descendant_pids(pid):
         worker = _probe_process(child_pid, role="worker")
         if worker is not None:
             workers.append(worker)
