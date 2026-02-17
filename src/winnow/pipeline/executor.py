@@ -54,6 +54,11 @@ from winnow.workers.pool import normalize_worker_count
 
 _LOGGER = get_logger("winnow.executor")
 
+_STAGE_FILTER_EXCLUDE_FIELDS: dict[str, str] = {
+    "blur": "is_blurry",
+    "darkness": "is_dark",
+}
+
 
 @dataclass(slots=True)
 class _StageWorkItem:
@@ -535,6 +540,60 @@ def _iter_stage_records_from_artifacts(
         yield from iter_jsonl_artifact(artifact_path)
 
 
+def _coerce_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "off", ""}:
+            return False
+    return None
+
+
+def _apply_stage_frame_filter(
+    *,
+    stage: StageDefinition,
+    batches: list[BatchInput],
+    paths: StatePaths,
+    active_frames: list[FrameInput],
+) -> list[FrameInput]:
+    exclude_field = _STAGE_FILTER_EXCLUDE_FIELDS.get(stage.name)
+    if exclude_field is None or not batches:
+        return active_frames
+
+    artifact_paths, _ = _collect_stage_artifacts_for_batches(
+        stage=stage,
+        batches=batches,
+        paths=paths,
+    )
+
+    excluded_frame_indices: set[int] = set()
+    for record in _iter_stage_records_from_artifacts(artifact_paths):
+        is_excluded = _coerce_bool(record.get(exclude_field))
+        if is_excluded is not True:
+            continue
+
+        frame_idx_raw = record.get("frame_idx")
+        if isinstance(frame_idx_raw, (int, float, str)):
+            try:
+                excluded_frame_indices.add(int(frame_idx_raw))
+            except ValueError:
+                continue
+
+    if not excluded_frame_indices:
+        return active_frames
+
+    return [
+        frame
+        for frame in active_frames
+        if frame.frame_idx not in excluded_frame_indices
+    ]
+
+
 def _globalize_stage_records(
     *,
     stage: StageDefinition,
@@ -810,6 +869,7 @@ def execute_pipeline_job(
         stage.name: {"completed": 0, "skipped": 0, "failed": 0} for stage in stages
     }
     stage_outputs: dict[str, Any] = {}
+    active_frames = frames
 
     started_at = _now()
     running_record: dict[str, Any] = {
@@ -857,9 +917,19 @@ def execute_pipeline_job(
 
     try:
         for stage in stages:
+            stage_batches = _make_batches(
+                stream_id=stream_id,
+                stream_path=scan.stream_path.resolve(),
+                frames=active_frames,
+                batch_size=config.batch_size,
+            )
+            unscheduled_batches = max(0, len(batches) - len(stage_batches))
+            if unscheduled_batches > 0:
+                stage_stats[stage.name]["skipped"] += unscheduled_batches
+
             _execute_stage(
                 stage=stage,
-                batches=batches,
+                batches=stage_batches,
                 paths=paths,
                 artifact_root=artifact_root,
                 stage_stats=stage_stats[stage.name],
@@ -868,7 +938,7 @@ def execute_pipeline_job(
 
             global_output = _write_global_stage_output(
                 stage=stage,
-                batches=batches,
+                batches=stage_batches,
                 paths=paths,
                 artifact_root=artifact_root,
                 stream_id=stream_id,
@@ -893,6 +963,13 @@ def execute_pipeline_job(
                     stage=stage.name,
                     record_count=global_output["record_count"],
                 )
+
+            active_frames = _apply_stage_frame_filter(
+                stage=stage,
+                batches=stage_batches,
+                paths=paths,
+                active_frames=active_frames,
+            )
 
         success_record = {
             **running_record,
